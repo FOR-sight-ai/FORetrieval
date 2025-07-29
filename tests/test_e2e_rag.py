@@ -4,28 +4,28 @@ from typing import Generator
 import pytest
 from colpali_engine.utils.torch_utils import get_torch_device, tear_down_torch
 
-from byaldi import RAGMultiModalModel
+from foretrieval import MultiModalRetrieverModel
 
 path_document_1 = Path("docs/attention.pdf")
 path_document_2 = Path("docs/attention_copy.pdf")
 
 
 @pytest.fixture(scope="function")
-def rag_model_from_pretrained() -> Generator[RAGMultiModalModel, None, None]:
+def rag_model_from_pretrained() -> Generator[MultiModalRetrieverModel, None, None]:
     device = get_torch_device("auto")
     print(f"Using device: {device}")
-    yield RAGMultiModalModel.from_pretrained("vidore/colpali-v1.2", device=device)
+    yield MultiModalRetrieverModel.from_pretrained("vidore/colpali-v1.2", device=device)
     tear_down_torch()
 
 
 @pytest.fixture(scope="function")
-def rag_model_from_index() -> Generator[RAGMultiModalModel, None, None]:
-    yield RAGMultiModalModel.from_index("multi_doc_index")
+def rag_model_from_index() -> Generator[MultiModalRetrieverModel, None, None]:
+    yield MultiModalRetrieverModel.from_index("multi_doc_index")
     tear_down_torch()
 
 
 @pytest.mark.slow
-def test_single_pdf(rag_model_from_pretrained: RAGMultiModalModel):
+def test_single_pdf(rag_model_from_pretrained: MultiModalRetrieverModel):
     if not Path("docs/attention.pdf").is_file():
         raise FileNotFoundError(
             f"Please download the PDF file from https://arxiv.org/pdf/1706.03762 and move it to {path_document_1}."
@@ -56,19 +56,19 @@ def test_single_pdf(rag_model_from_pretrained: RAGMultiModalModel):
 
         # Check if the expected page (6 for positional encoding) is in the top results
         if "positional encoding" in query.lower():
-            assert any(
-                r.page_num == 6 for r in results
-            ), "Expected page 6 for positional encoding query"
+            assert any(r.page_num == 6 for r in results), (
+                "Expected page 6 for positional encoding query"
+            )
 
         # Check if the expected pages (8 and 9 for BLEU score) are in the top results
         if "bleu score" in query.lower():
-            assert any(
-                r.page_num in [8, 9] for r in results
-            ), "Expected pages 8 or 9 for BLEU score query"
+            assert any(r.page_num in [8, 9] for r in results), (
+                "Expected pages 8 or 9 for BLEU score query"
+            )
 
 
 @pytest.mark.slow
-def test_multi_document(rag_model_from_pretrained: RAGMultiModalModel):
+def test_multi_document(rag_model_from_pretrained: MultiModalRetrieverModel):
     if not Path("docs/attention.pdf").is_file():
         raise FileNotFoundError(
             f"Please download the PDF file from https://arxiv.org/pdf/1706.03762 and move it to {path_document_1}."
@@ -103,20 +103,20 @@ def test_multi_document(rag_model_from_pretrained: RAGMultiModalModel):
 
         # Check if the expected page (6 for positional encoding) is in the top results
         if "positional encoding" in query.lower():
-            assert any(
-                r.page_num == 6 for r in results
-            ), "Expected page 6 for positional encoding query"
+            assert any(r.page_num == 6 for r in results), (
+                "Expected page 6 for positional encoding query"
+            )
 
         # Check if the expected pages (8 and 9 for BLEU score) are in the top results
         if "bleu score" in query.lower():
-            assert any(
-                r.page_num in [8, 9] for r in results
-            ), "Expected pages 8 or 9 for BLEU score query"
+            assert any(r.page_num in [8, 9] for r in results), (
+                "Expected pages 8 or 9 for BLEU score query"
+            )
 
 
 @pytest.mark.skip("This test should be made independent of the previous tests.")
 @pytest.mark.slow
-def test_add_to_index(rag_model_from_index: RAGMultiModalModel):
+def test_add_to_index(rag_model_from_index: MultiModalRetrieverModel):
     # NOTE: This test should run after the test_multi_document test.
 
     # Add a new document to the index
@@ -142,12 +142,12 @@ def test_add_to_index(rag_model_from_index: RAGMultiModalModel):
 
         # Check if the expected page (6 for positional encoding) is in the top results
         if "positional encoding" in query.lower():
-            assert any(
-                r.page_num == 6 for r in results
-            ), "Expected page 6 for positional encoding query"
+            assert any(r.page_num == 6 for r in results), (
+                "Expected page 6 for positional encoding query"
+            )
 
         # Check if the expected pages (8 and 9 for BLEU score) are in the top results
         if "bleu score" in query.lower():
-            assert any(
-                r.page_num in [8, 9] for r in results
-            ), "Expected pages 8 or 9 for BLEU score query"
+            assert any(r.page_num in [8, 9] for r in results), (
+                "Expected pages 8 or 9 for BLEU score query"
+            )

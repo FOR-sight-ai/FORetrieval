@@ -1,7 +1,7 @@
 import os
 import shutil
 import tempfile
-from importlib.metadata import version
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Union, cast
 
@@ -11,10 +11,13 @@ from colpali_engine.models import ColPali, ColPaliProcessor, ColQwen2, ColQwen2P
 from pdf2image import convert_from_path
 from PIL import Image
 
-from byaldi.objects import Result
+from .objects import Result
 
-# Import version directly from the package metadata
-VERSION = version("Byaldi")
+
+VERSION = "0.0.1"
+
+# set the name for logging
+logger = logging.getLogger(__name__)
 
 
 class ColPaliModel:
@@ -48,10 +51,12 @@ class ColPaliModel:
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
         self.model_name = self.pretrained_model_name_or_path
         self.n_gpu = torch.cuda.device_count() if n_gpu == -1 else n_gpu
-        device = (
-            device or (
-                "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-            )
+        device = device or (
+            "cuda"
+            if torch.cuda.is_available()
+            else "mps"
+            if torch.backends.mps.is_available()
+            else "cpu"
         )
         self.index_name = index_name
         self.verbose = verbose
@@ -384,6 +389,9 @@ class ColPaliModel:
             self.doc_ids_to_file_names[doc_id] = str(input_path)
 
         self._export_index()
+        if self.highest_doc_id == -1:
+            logger.warning("No documents were indexed.")
+
         return self.doc_ids_to_file_names
 
     def add_to_index(
@@ -535,7 +543,11 @@ class ColPaliModel:
         # Generate embedding
         with torch.inference_mode():
             processed_image = {
-                k: v.to(self.device).to(self.model.dtype if v.dtype in [torch.float16, torch.bfloat16, torch.float32] else v.dtype)
+                k: v.to(self.device).to(
+                    self.model.dtype
+                    if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
+                    else v.dtype
+                )
                 for k, v in processed_image.items()
             }
             embedding = self.model(**processed_image)
@@ -572,7 +584,7 @@ class ColPaliModel:
                     print(
                         f"Resizing image to {new_width}x{new_height}",
                         f"(aspect ratio {aspect_ratio:.2f}, original size {img_width}x{img_height},"
-                        f"compression {new_width/img_width * new_height/img_height:.2f})",
+                        f"compression {new_width / img_width * new_height / img_height:.2f})",
                     )
                 image = image.resize((new_width, new_height), Image.LANCZOS)
 
@@ -592,24 +604,32 @@ class ColPaliModel:
     def remove_from_index(self):
         raise NotImplementedError("This method is not implemented yet.")
 
-    def filter_embeddings(self,filter_metadata:Dict[str,str]):
+    def filter_embeddings(self, filter_metadata: Dict[str, str]):
         req_doc_ids = []
-        for idx,metadata_dict in self.doc_id_to_metadata.items():
-            for metadata_key,metadata_value in metadata_dict.items():
+        for idx, metadata_dict in self.doc_id_to_metadata.items():
+            for metadata_key, metadata_value in metadata_dict.items():
                 if metadata_key in filter_metadata:
                     if filter_metadata[metadata_key] == metadata_value:
                         req_doc_ids.append(idx)
-                        
-        req_embedding_ids = [eid for eid,doc in self.embed_id_to_doc_id.items() if doc['doc_id'] in req_doc_ids]
-        req_embeddings = [ie for idx,ie in enumerate(self.indexed_embeddings) if idx in req_embedding_ids]
+
+        req_embedding_ids = [
+            eid
+            for eid, doc in self.embed_id_to_doc_id.items()
+            if doc["doc_id"] in req_doc_ids
+        ]
+        req_embeddings = [
+            ie
+            for idx, ie in enumerate(self.indexed_embeddings)
+            if idx in req_embedding_ids
+        ]
 
         return req_embeddings, req_embedding_ids
-    
+
     def search(
         self,
         query: Union[str, List[str]],
         k: int = 10,
-        filter_metadata: Optional[Dict[str,str]] = None,
+        filter_metadata: Optional[Dict[str, str]] = None,
         return_base64_results: Optional[bool] = None,
     ) -> Union[List[Result], List[List[Result]]]:
         # Set default value for return_base64_results if not provided
@@ -631,15 +651,24 @@ class ColPaliModel:
             # Process query
             with torch.inference_mode():
                 batch_query = self.processor.process_queries([q])
-                batch_query = {k: v.to(self.device).to(self.model.dtype if v.dtype in [torch.float16, torch.bfloat16, torch.float32] else v.dtype) for k, v in batch_query.items()}
+                batch_query = {
+                    k: v.to(self.device).to(
+                        self.model.dtype
+                        if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
+                        else v.dtype
+                    )
+                    for k, v in batch_query.items()
+                }
                 embeddings_query = self.model(**batch_query)
             qs = list(torch.unbind(embeddings_query.to("cpu")))
             if not filter_metadata:
                 req_embeddings = self.indexed_embeddings
             else:
-                req_embeddings, req_embedding_ids = self.filter_embeddings(filter_metadata=filter_metadata) 
+                req_embeddings, req_embedding_ids = self.filter_embeddings(
+                    filter_metadata=filter_metadata
+                )
             # Compute scores
-            scores = self.processor.score(qs,req_embeddings).cpu().numpy()
+            scores = self.processor.score(qs, req_embeddings).cpu().numpy()
 
             # Get top k relevant pages
             top_pages = scores.argsort(axis=1)[0][-k:][::-1].tolist()
@@ -714,7 +743,14 @@ class ColPaliModel:
 
         with torch.inference_mode():
             batch = self.processor.process_images(images)
-            batch = {k: v.to(self.device).to(self.model.dtype if v.dtype in [torch.float16, torch.bfloat16, torch.float32] else v.dtype) for k, v in batch.items()}
+            batch = {
+                k: v.to(self.device).to(
+                    self.model.dtype
+                    if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
+                    else v.dtype
+                )
+                for k, v in batch.items()
+            }
             embeddings = self.model(**batch)
 
         return embeddings.cpu()
@@ -735,7 +771,14 @@ class ColPaliModel:
 
         with torch.inference_mode():
             batch = self.processor.process_queries(query)
-            batch = {k: v.to(self.device).to(self.model.dtype if v.dtype in [torch.float16, torch.bfloat16, torch.float32] else v.dtype) for k, v in batch.items()}
+            batch = {
+                k: v.to(self.device).to(
+                    self.model.dtype
+                    if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
+                    else v.dtype
+                )
+                for k, v in batch.items()
+            }
             embeddings = self.model(**batch)
 
         return embeddings.cpu()
