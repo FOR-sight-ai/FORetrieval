@@ -311,7 +311,7 @@ class ColPaliModel:
         metadata: Optional[List[Dict[str, Union[str, int]]]] = None,
         max_image_width: Optional[int] = None,
         max_image_height: Optional[int] = None,
-    ) -> Dict[int, str]:
+    ) -> Union[Dict[int, str], None]:
         if (
             self.index_name is not None
             and (index_name is None or self.index_name == index_name)
@@ -326,13 +326,11 @@ class ColPaliModel:
             return None
         if index_name is None:
             raise ValueError("index_name must be specified to create a new index.")
-        if store_collection_with_index:
-            self.full_document_collection = True
 
         index_path = Path(self.index_root) / Path(index_name)
         if index_path.exists():
             if overwrite is False:
-                raise ValueError(
+                logger.warning(
                     f"An index named {index_name} already exists.",
                     "Use overwrite=True to delete the existing index and build a new one.",
                     "Exiting indexing without doing anything...",
@@ -344,6 +342,8 @@ class ColPaliModel:
                 )
                 shutil.rmtree(index_path)
 
+        if store_collection_with_index:
+            self.full_document_collection = True
         self.index_name = index_name
         self.max_image_width = max_image_width
         self.max_image_height = max_image_height
