@@ -631,7 +631,7 @@ class ColPaliModel:
         k: int = 10,
         filter_metadata: Optional[Dict[str, str]] = None,
         return_base64_results: Optional[bool] = None,
-    ) -> Union[List[Result], List[List[Result]]]:
+    ) -> List[Result]:
         # Set default value for return_base64_results if not provided
         if return_base64_results is None:
             return_base64_results = bool(self.collection)

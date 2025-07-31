@@ -160,7 +160,7 @@ class MultiModalRetrieverModel:
         k: int = 10,
         filter_metadata: Optional[Dict[str, str]] = None,
         return_base64_results: Optional[bool] = None,
-    ) -> Union[List[Result], List[List[Result]]]:
+    ) -> List[Result]:
         """Query an index.
 
         Parameters:

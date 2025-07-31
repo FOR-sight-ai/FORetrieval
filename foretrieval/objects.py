@@ -1,20 +1,19 @@
 from typing import Optional
 
+from pydantic import BaseModel
 
-class Result:
-    def __init__(
-        self,
-        doc_id: str,
-        page_num: int,
-        score: float,
-        metadata: Optional[dict] = None,
-        base64: Optional[str] = None,
-    ):
-        self.doc_id = doc_id
-        self.page_num = page_num
-        self.score = score
-        self.metadata = metadata or {}
-        self.base64 = base64
+
+class Result(BaseModel):
+    doc_id: str
+    """The unique identifier for the document."""
+    page_num: int
+    """The page number within the document."""
+    score: float
+    """The relevance score of the document."""
+    metadata: Optional[dict] = None
+    """Additional metadata associated with the document."""
+    base64: Optional[str] = None
+    """Base64 encoded content of the document."""
 
     def dict(self):
         return {
