@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 
 class Result(BaseModel):
-    doc_id: str
+    doc_id: int
     """The unique identifier for the document."""
     page_num: int
     """The page number within the document."""
