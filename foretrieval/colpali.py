@@ -784,7 +784,7 @@ class ColPaliModel:
     def get_doc_ids_to_file_names(self):
         return self.doc_ids_to_file_names
 
-    def get_result_img(self, result: Result, page_id) -> str:
+    def get_result_img(self, result: Result) -> str:
         """
         Get the image of the result at a given page.
         Args:
@@ -796,7 +796,9 @@ class ColPaliModel:
         doc_id = result.doc_id
         file_name = self.doc_ids_to_file_names[doc_id]
         # get the image from the file using pdf2image
-        images = convert_from_path(file_name, first_page=page_id, last_page=page_id)
+        images = convert_from_path(
+            file_name, first_page=result.page_num, last_page=result.page_num
+        )
         image = images[0]
         # convert the image to base64
         buffered = io.BytesIO()
