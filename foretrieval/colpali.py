@@ -1,7 +1,9 @@
+import base64
+import io
+import logging
 import os
 import shutil
 import tempfile
-import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Union, cast
 
@@ -12,7 +14,6 @@ from pdf2image import convert_from_path
 from PIL import Image
 
 from .objects import Result
-
 
 VERSION = "0.0.1"
 
@@ -564,9 +565,6 @@ class ColPaliModel:
         )
 
         if store_collection_with_index:
-            import base64
-            import io
-
             # Resize image while maintaining aspect ratio
             if self.max_image_width and self.max_image_height:
                 img_width, img_height = image.size
@@ -785,3 +783,23 @@ class ColPaliModel:
 
     def get_doc_ids_to_file_names(self):
         return self.doc_ids_to_file_names
+
+    def get_result_img(self, result: Result, page_id) -> str:
+        """
+        Get the image of the result at a given page.
+        Args:
+            result (Result): The result object.
+            page_id (int): The page id of the result.
+        Returns:
+            str: The base64 encoded image of the result.
+        """
+        doc_id = result.doc_id
+        file_name = self.doc_ids_to_file_names[doc_id]
+        # get the image from the file using pdf2image
+        images = convert_from_path(file_name, first_page=page_id, last_page=page_id)
+        image = images[0]
+        # convert the image to base64
+        buffered = io.BytesIO()
+        image.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        return img_str
