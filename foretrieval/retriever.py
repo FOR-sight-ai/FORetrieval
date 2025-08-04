@@ -35,7 +35,7 @@ class MultiModalRetrieverModel:
     ```
     """
 
-    model: Optional[ColPaliModel] = None
+    model: ColPaliModel
 
     @classmethod
     def from_pretrained(
@@ -175,9 +175,6 @@ class MultiModalRetrieverModel:
 
     def get_doc_ids_to_file_names(self):
         return self.model.get_doc_ids_to_file_names()
-
-    def retrieve(self, results: List[Result]) -> List[str]:
-        return [self.model.get_result_img(result) for result in results]
 
     def as_langchain_retriever(self, **kwargs: Any):
         return FORetrievalLangChain(model=self, kwargs=kwargs)

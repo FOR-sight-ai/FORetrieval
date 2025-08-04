@@ -523,6 +523,33 @@ class ColPaliModel:
         else:
             raise ValueError(f"Unsupported input type: {type(item)}")
 
+    def _post_process_image(self, image: Image.Image) -> str:
+        # Resize image while maintaining aspect ratio
+        if self.max_image_width and self.max_image_height:
+            img_width, img_height = image.size
+            aspect_ratio = img_width / img_height
+            if img_width > self.max_image_width:
+                new_width = self.max_image_width
+                new_height = int(new_width / aspect_ratio)
+            else:
+                new_width = img_width
+                new_height = img_height
+            if new_height > self.max_image_height:
+                new_height = self.max_image_height
+                new_width = int(new_height * aspect_ratio)
+            if self.verbose > 2:
+                print(
+                    f"Resizing image to {new_width}x{new_height}",
+                    f"(aspect ratio {aspect_ratio:.2f}, original size {img_width}x{img_height},"
+                    f"compression {new_width / img_width * new_height / img_height:.2f})",
+                )
+            image = image.resize((new_width, new_height), Image.LANCZOS)
+
+        buffered = io.BytesIO()
+        image.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        return img_str
+
     def _add_to_index(
         self,
         image: Image.Image,
@@ -565,31 +592,7 @@ class ColPaliModel:
         )
 
         if store_collection_with_index:
-            # Resize image while maintaining aspect ratio
-            if self.max_image_width and self.max_image_height:
-                img_width, img_height = image.size
-                aspect_ratio = img_width / img_height
-                if img_width > self.max_image_width:
-                    new_width = self.max_image_width
-                    new_height = int(new_width / aspect_ratio)
-                else:
-                    new_width = img_width
-                    new_height = img_height
-                if new_height > self.max_image_height:
-                    new_height = self.max_image_height
-                    new_width = int(new_height * aspect_ratio)
-                if self.verbose > 2:
-                    print(
-                        f"Resizing image to {new_width}x{new_height}",
-                        f"(aspect ratio {aspect_ratio:.2f}, original size {img_width}x{img_height},"
-                        f"compression {new_width / img_width * new_height / img_height:.2f})",
-                    )
-                image = image.resize((new_width, new_height), Image.LANCZOS)
-
-            buffered = io.BytesIO()
-            image.save(buffered, format="PNG")
-            img_str = base64.b64encode(buffered.getvalue()).decode()
-
+            img_str = self._post_process_image(image)
             self.collection[int(embed_id)] = img_str
 
         # Add metadata
@@ -625,7 +628,7 @@ class ColPaliModel:
 
     def search(
         self,
-        query: Union[str, List[str]],
+        query: str,
         k: int = 10,
         filter_metadata: Optional[Dict[str, str]] = None,
         return_base64_results: Optional[bool] = None,
@@ -634,37 +637,29 @@ class ColPaliModel:
         if return_base64_results is None:
             return_base64_results = bool(self.collection)
 
-        valid_metadata_keys = list(self.doc_id_to_metadata.values())
         # Ensure k is not larger than the number of indexed documents
         k = min(k, len(self.indexed_embeddings))
 
-        # Process query/queries
-        if isinstance(query, str):
-            queries = [query]
-        else:
-            queries = query
-
-        results = []
-        for q in queries:
-            # Process query
-            with torch.inference_mode():
-                batch_query = self.processor.process_queries([q])
-                batch_query = {
-                    k: v.to(self.device).to(
-                        self.model.dtype
-                        if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
-                        else v.dtype
-                    )
-                    for k, v in batch_query.items()
-                }
-                embeddings_query = self.model(**batch_query)
-            qs = list(torch.unbind(embeddings_query.to("cpu")))
-            if not filter_metadata:
-                req_embeddings = self.indexed_embeddings
-            else:
-                req_embeddings, req_embedding_ids = self.filter_embeddings(
-                    filter_metadata=filter_metadata
+        # Process query
+        with torch.inference_mode():
+            batch_query = self.processor.process_queries([query])
+            batch_query = {
+                k: v.to(self.device).to(
+                    self.model.dtype
+                    if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
+                    else v.dtype
                 )
+                for k, v in batch_query.items()
+            }
+            embeddings_query = self.model(**batch_query)
+            qs = list(torch.unbind(embeddings_query.to("cpu")))
+
+        # Get embeddings to search against
+        if filter_metadata:
+            req_embeddings, req_embedding_ids = self.filter_embeddings(filter_metadata)
+        else:
+            req_embeddings = self.indexed_embeddings
+            req_embedding_ids = list(range(len(self.indexed_embeddings)))
             # Compute scores
             scores = self.processor.score(qs, req_embeddings).cpu().numpy()
 
@@ -672,27 +667,27 @@ class ColPaliModel:
             top_pages = scores.argsort(axis=1)[0][-k:][::-1].tolist()
 
             # Create Result objects
-            query_results = []
-            for embed_id in top_pages:
-                if filter_metadata:
-                    adjusted_embed_id = req_embedding_ids[embed_id]
-                else:
-                    adjusted_embed_id = int(embed_id)
-                doc_info = self.embed_id_to_doc_id[adjusted_embed_id]
-                result = Result(
-                    doc_id=doc_info["doc_id"],
-                    page_num=int(doc_info["page_id"]),
-                    score=float(scores[0][int(embed_id)]),
-                    metadata=self.doc_id_to_metadata.get(int(doc_info["doc_id"]), {}),
-                    base64=self.collection.get(adjusted_embed_id)
-                    if return_base64_results
-                    else None,
-                )
-                query_results.append(result)
+        results = []
+        for embed_id in top_pages:
+            adjusted_embed_id = req_embedding_ids[embed_id]
+            doc_info = self.embed_id_to_doc_id[adjusted_embed_id]
 
-            results.append(query_results)
+            result = Result(
+                doc_id=doc_info["doc_id"],
+                page_num=int(doc_info["page_id"]),
+                score=float(scores[0][embed_id]),
+                metadata=self.doc_id_to_metadata.get(int(doc_info["doc_id"]), {}),
+                base64=self.collection.get(adjusted_embed_id)
+                if return_base64_results
+                else None,
+            )
+            results.append(result)
 
-        return results[0] if isinstance(query, str) else results
+        if return_base64_results:
+            for result in results:
+                self.fetch_result_img(result)
+
+        return results
 
     def encode_image(
         self, input_data: Union[str, Image.Image, List[Union[str, Image.Image]]]
@@ -784,24 +779,30 @@ class ColPaliModel:
     def get_doc_ids_to_file_names(self):
         return self.doc_ids_to_file_names
 
-    def get_result_img(self, result: Result) -> str:
+    def fetch_result_img(self, result: Result) -> Result:
         """
-        Get the image of the result at a given page.
+        Get the image of the result at a given page and put it in the result object.
         Args:
             result (Result): The result object.
             page_id (int): The page id of the result.
         Returns:
             str: The base64 encoded image of the result.
         """
-        doc_id = result.doc_id
-        file_name = self.doc_ids_to_file_names[doc_id]
-        # get the image from the file using pdf2image
-        images = convert_from_path(
-            file_name, first_page=result.page_num, last_page=result.page_num
-        )
-        image = images[0]
-        # convert the image to base64
-        buffered = io.BytesIO()
-        image.save(buffered, format="PNG")
-        img_str = base64.b64encode(buffered.getvalue()).decode()
-        return img_str
+        if not result.base64:
+            doc_id = result.doc_id
+            file_name = self.doc_ids_to_file_names[doc_id]
+            # get the image from the file using pdf2image
+            with tempfile.TemporaryDirectory() as path:
+                images = convert_from_path(
+                    file_name,
+                    thread_count=os.cpu_count() - 1,
+                    first_page=result.page_num,
+                    last_page=result.page_num,
+                    paths_only=True,
+                    output_folder=path,
+                )
+                image = Image.open(images[0])
+                img_str = self._post_process_image(image)
+
+            result.base64 = img_str
+        return result
