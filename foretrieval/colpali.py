@@ -786,7 +786,7 @@ class ColPaliModel:
             result (Result): The result object.
             page_id (int): The page id of the result.
         Returns:
-            str: The base64 encoded image of the result.
+            Result: The result object with the image of the result at the given page.
         """
         if not result.base64:
             doc_id = result.doc_id

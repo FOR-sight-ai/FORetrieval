@@ -8,7 +8,7 @@ class Result(BaseModel):
     """The unique identifier for the document."""
     page_num: int
     """The page number within the document."""
-    score: float
+    score: Optional[float] = None
     """The relevance score of the document."""
     metadata: Optional[dict] = None
     """Additional metadata associated with the document."""

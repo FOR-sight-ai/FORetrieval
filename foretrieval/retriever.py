@@ -156,7 +156,7 @@ class MultiModalRetrieverModel:
 
     def search(
         self,
-        query: Union[str, List[str]],
+        query: str,
         k: int = 10,
         filter_metadata: Optional[Dict[str, str]] = None,
         return_base64_results: Optional[bool] = None,
@@ -172,6 +172,10 @@ class MultiModalRetrieverModel:
             Union[List[Result], List[List[Result]]]: A list of Result objects or a list of lists of Result objects.
         """
         return self.model.search(query, k, filter_metadata, return_base64_results)
+
+    def fetch(self, result: Result) -> Result:
+        """Fetch a result from the index."""
+        return self.model.fetch_result_img(result)
 
     def get_doc_ids_to_file_names(self):
         return self.model.get_doc_ids_to_file_names()
