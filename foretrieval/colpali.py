@@ -9,7 +9,14 @@ from typing import Dict, List, Optional, Union, cast
 
 import srsly
 import torch
-from colpali_engine.models import ColPali, ColPaliProcessor, ColQwen2, ColQwen2Processor
+from colpali_engine.models import (
+    ColPali,
+    ColPaliProcessor,
+    ColQwen2,
+    ColQwen2Processor,
+    ColQwen2_5,
+    ColQwen2_5_Processor,
+)
 from pdf2image import convert_from_path
 from PIL import Image
 
@@ -83,6 +90,18 @@ class ColPaliModel:
                 ),
                 token=kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN"),
             )
+        elif "colqwen2.5" in pretrained_model_name_or_path.lower():
+            self.model = ColQwen2_5.from_pretrained(
+                self.pretrained_model_name_or_path,
+                torch_dtype=torch.bfloat16,
+                device_map=(
+                    "cuda"
+                    if device == "cuda"
+                    or (isinstance(device, torch.device) and device.type == "cuda")
+                    else None
+                ),
+                token=kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN"),
+            )
         elif "colqwen2" in pretrained_model_name_or_path.lower():
             self.model = ColQwen2.from_pretrained(
                 self.pretrained_model_name_or_path,
@@ -101,6 +120,14 @@ class ColPaliModel:
             self.processor = cast(
                 ColPaliProcessor,
                 ColPaliProcessor.from_pretrained(
+                    self.pretrained_model_name_or_path,
+                    token=kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN"),
+                ),
+            )
+        elif "colqwen2.5" in pretrained_model_name_or_path.lower():
+            self.processor = cast(
+                ColQwen2_5_Processor,
+                ColQwen2_5_Processor.from_pretrained(
                     self.pretrained_model_name_or_path,
                     token=kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN"),
                 ),
