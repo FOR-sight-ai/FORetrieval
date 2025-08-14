@@ -13,12 +13,13 @@ from colpali_engine.models import (
     ColPali,
     ColPaliProcessor,
     ColQwen2,
-    ColQwen2Processor,
     ColQwen2_5,
     ColQwen2_5_Processor,
+    ColQwen2Processor,
 )
 from pdf2image import convert_from_path
 from PIL import Image
+from tqdm import tqdm
 
 from .objects import Result
 
@@ -339,6 +340,7 @@ class ColPaliModel:
         metadata: Optional[List[Dict[str, Union[str, int]]]] = None,
         max_image_width: Optional[int] = None,
         max_image_height: Optional[int] = None,
+        batch_size: int = 1,
     ) -> Union[Dict[int, str], None]:
         if (
             self.index_name is not None
@@ -390,8 +392,9 @@ class ColPaliModel:
                 raise ValueError(
                     f"Number of metadata entries ({len(metadata)}) does not match number of documents ({len(items)})"
                 )
-            for i, item in enumerate(items):
-                print(f"Indexing file: {item}")
+            for i, item in tqdm(
+                enumerate(items), total=len(items), desc="Indexing files"
+            ):
                 doc_id = doc_ids[i] if doc_ids else self.highest_doc_id + 1
                 doc_metadata = metadata[doc_id] if metadata else None
                 self.add_to_index(
@@ -399,6 +402,7 @@ class ColPaliModel:
                     store_collection_with_index,
                     doc_id=doc_id,
                     metadata=doc_metadata,
+                    batch_size=batch_size,
                 )
                 self.doc_ids_to_file_names[doc_id] = str(item)
         else:
@@ -428,6 +432,7 @@ class ColPaliModel:
         store_collection_with_index: bool,
         doc_id: Optional[Union[int, List[int]]] = None,
         metadata: Optional[List[Dict[str, Union[str, int]]]] = None,
+        batch_size: int = 1,
     ) -> Dict[int, str]:
         if self.index_name is None:
             raise ValueError(
@@ -475,6 +480,7 @@ class ColPaliModel:
                         store_collection_with_index,
                         current_doc_id,
                         current_metadata,
+                        batch_size,
                     )
                 else:
                     self._process_and_add_to_index(
@@ -482,6 +488,7 @@ class ColPaliModel:
                         store_collection_with_index,
                         current_doc_id,
                         current_metadata,
+                        batch_size,
                     )
                 self.doc_ids_to_file_names[current_doc_id] = str(item_path)
             elif isinstance(item, Image.Image):
@@ -501,12 +508,13 @@ class ColPaliModel:
         store_collection_with_index: bool,
         base_doc_id: int,
         metadata: Optional[Dict[str, Union[str, int]]],
+        batch_size: int,
     ):
         for i, item in enumerate(directory.iterdir()):
             print(f"Indexing file: {item}")
             current_doc_id = base_doc_id + i
             self._process_and_add_to_index(
-                item, store_collection_with_index, current_doc_id, metadata
+                item, store_collection_with_index, current_doc_id, metadata, batch_size
             )
             self.doc_ids_to_file_names[current_doc_id] = str(item)
 
@@ -516,8 +524,9 @@ class ColPaliModel:
         store_collection_with_index: bool,
         doc_id: Union[str, int],
         metadata: Optional[Dict[str, Union[str, int]]] = None,
+        batch_size: int = 1,
     ):
-        """TODO: THERE ARE TOO MANY FUNCTIONS DOING THINGS HERE. I blame Claude, but this is temporary anyway."""
+        """Process and add an image or PDF to the index, using batch processing."""
         if isinstance(item, Path):
             if item.suffix.lower() == ".pdf":
                 with tempfile.TemporaryDirectory() as path:
@@ -527,13 +536,20 @@ class ColPaliModel:
                         output_folder=path,
                         paths_only=True,
                     )
-                    for i, image_path in enumerate(images):
-                        image = Image.open(image_path)
+                    # Process images in batches
+                    for i in range(0, len(images), batch_size):
+                        batch_images = []
+                        batch_page_ids = []
+                        for j in range(i, min(i + batch_size, len(images))):
+                            image_path = images[j]
+                            image = Image.open(image_path)
+                            batch_images.append(image)
+                            batch_page_ids.append(j + 1)
                         self._add_to_index(
-                            image,
+                            batch_images,
                             store_collection_with_index,
                             doc_id,
-                            page_id=i + 1,
+                            page_ids=batch_page_ids,
                             metadata=metadata,
                         )
             elif item.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp"]:
@@ -541,8 +557,6 @@ class ColPaliModel:
                 self._add_to_index(
                     image, store_collection_with_index, doc_id, metadata=metadata
                 )
-            else:
-                raise ValueError(f"Unsupported input type: {item.suffix}")
         elif isinstance(item, Image.Image):
             self._add_to_index(
                 item, store_collection_with_index, doc_id, metadata=metadata
@@ -579,38 +593,64 @@ class ColPaliModel:
 
     def _add_to_index(
         self,
-        image: Image.Image,
+        images: Union[Image.Image, List[Image.Image]],
         store_collection_with_index: bool,
         doc_id: Union[str, int],
-        page_id: int = 1,
+        page_ids: Union[int, List[int]] = 1,
         metadata: Optional[Dict[str, Union[str, int]]] = None,
     ):
-        if any(
-            entry["doc_id"] == doc_id and entry["page_id"] == page_id
-            for entry in self.embed_id_to_doc_id.values()
-        ):
+        # Convert single image to list for uniform processing
+        if isinstance(images, Image.Image):
+            images = [images]
+
+        # Convert single page_id to list for uniform processing
+        if isinstance(page_ids, int):
+            page_ids = [page_ids]
+
+        # Validate input lengths
+        if len(images) != len(page_ids):
             raise ValueError(
-                f"Document ID {doc_id} with page ID {page_id} already exists in the index"
+                f"Number of images ({len(images)}) does not match number of page_ids ({len(page_ids)})"
             )
 
-        processed_image = self.processor.process_images([image])
+        # Check for existing entries
+        for page_id in page_ids:
+            if any(
+                entry["doc_id"] == doc_id and entry["page_id"] == page_id
+                for entry in self.embed_id_to_doc_id.values()
+            ):
+                raise ValueError(
+                    f"Document ID {doc_id} with page ID {page_id} already exists in the index"
+                )
 
-        # Generate embedding
+        # Process images in batches
+        processed_images = self.processor.process_images(images)
+
+        # Generate embeddings
         with torch.inference_mode():
-            processed_image = {
+            processed_images = {
                 k: v.to(self.device).to(
                     self.model.dtype
                     if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
                     else v.dtype
                 )
-                for k, v in processed_image.items()
+                for k, v in processed_images.items()
             }
-            embedding = self.model(**processed_image)
+            embeddings = self.model(**processed_images)
 
         # Add to index
-        embed_id = len(self.indexed_embeddings)
-        self.indexed_embeddings.extend(list(torch.unbind(embedding.to("cpu"))))
-        self.embed_id_to_doc_id[embed_id] = {"doc_id": doc_id, "page_id": int(page_id)}
+        embeddings_list = list(torch.unbind(embeddings.to("cpu")))
+        for i, (embedding, page_id) in enumerate(zip(embeddings_list, page_ids)):
+            embed_id = len(self.indexed_embeddings)
+            self.indexed_embeddings.append(embedding)
+            self.embed_id_to_doc_id[embed_id] = {
+                "doc_id": doc_id,
+                "page_id": int(page_id),
+            }
+
+            if store_collection_with_index:
+                img_str = self._post_process_image(images[i])
+                self.collection[int(embed_id)] = img_str
 
         # Update highest_doc_id
         self.highest_doc_id = max(
@@ -618,16 +658,12 @@ class ColPaliModel:
             int(doc_id) if isinstance(doc_id, int) else self.highest_doc_id,
         )
 
-        if store_collection_with_index:
-            img_str = self._post_process_image(image)
-            self.collection[int(embed_id)] = img_str
-
         # Add metadata
         if metadata:
             self.doc_id_to_metadata[doc_id] = metadata
 
         if self.verbose > 0:
-            print(f"Added page {page_id} of document {doc_id} to index.")
+            print(f"Added {len(images)} pages of document {doc_id} to index.")
 
     def remove_from_index(self):
         raise NotImplementedError("This method is not implemented yet.")
