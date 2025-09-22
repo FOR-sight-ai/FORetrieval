@@ -1,0 +1,55 @@
+{
+    "HF_TOKEN": "none",
+    "log_path": "logs/forag.log",
+    "retriever":
+    {
+        "model": {
+            "name": "vidore/colqwen2-v1.0",
+            "path": "models/",
+            "use_flash_attention": false,
+            "device": "cuda:0"
+        },
+        "retrieval":{
+            "top_k": 10
+        },
+        "index": {
+            "root": "index/",
+            "name": "toy_index",
+            "data_path": "FORetrieval/outside_world/docs",
+            "pointer_based": true,
+            "overwrite": true
+        }
+    },
+    "generator":
+    {
+        "model": {
+            "provider": "ollama",
+            "url": "http://localhost:11434",
+            "name": "qwen2.5vl:32b"
+        }
+    },
+    "agents":
+    {
+        "retriever":{
+            "model": {
+                "provider": "ollama",
+                "url": "http://localhost:11434",
+                "name": "qwen2.5vl:32b",
+                "num_ctx": 8192,
+                "api_key": "none"
+            },
+            "max_steps": 3,
+            "top_k": 3,
+            "image_analyzer":
+            {
+                "model": {
+                    "provider": "mistral",
+                    "name":"pixtral-12b-2409",
+                    "api_key": "",
+                    "requests_per_minute": 10,
+                    "timeout": 20
+                }
+            }
+        }
+    }
+}

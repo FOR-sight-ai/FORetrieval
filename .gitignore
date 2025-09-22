@@ -1,0 +1,13 @@
+logs/
+models/
+index/
+.venv/
+__pycache__/
+.ruff_cache/
+*.pyc
+*.pyo
+*.pyd
+*.ipynb_checkpoints
+*.DS_Store
+*.env
+*.log

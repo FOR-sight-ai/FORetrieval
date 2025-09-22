@@ -1,0 +1,225 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+        "HF_TOKEN": {
+            "type": "string"
+        },
+        "log_path": {
+            "type": "string"
+        },
+        "retriever": {
+            "type": "object",
+            "properties": {
+                "model": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string"
+                        },
+                        "path": {
+                            "type": "string"
+                        },
+                        "use_flash_attention": {
+                            "type": "boolean"
+                        },
+                        "device": {
+                            "type": "string"
+                        }
+
+                    },
+                    "required": ["name"]
+                },
+                "retrieval": {
+                    "type": "object",
+                    "properties": {
+                        "top_k": {
+                            "type": "integer"
+                        }
+                    },
+                    "required": ["top_k"]
+                },
+                "index": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string"
+                        },
+                        "root": {
+                            "type": "string"
+                            },
+                        "overwrite": {
+                            "type": "boolean"
+                            },
+                        "data_path": {
+                            "type": "string"
+                            },
+                        "pointer_based": {
+                            "type": "boolean"
+                            },
+                        "batch_size": {
+                            "type": "integer"
+                            }
+                    },
+                    "required": ["root"]
+                }
+            },
+            "required": ["model", "retrieval", "index"]
+        },
+        "generator": {
+            "type": "object",
+            "properties": {
+                "model": {
+                    "type": "object",
+                    "properties": {
+                        "provider": {
+                            "type": "string",
+                            "enum": ["ollama", "openai", "hf"]
+                        },
+                        "url": {
+                            "type": "string"
+                        },
+                        "api_key": {
+                            "type": "string"
+                        },
+                        "name": {
+                            "type": "string"
+                        },
+                        "timeout": {
+                            "type": "integer"
+                            }
+                    },
+                    "required": ["provider", "name"]
+                }
+            },
+            "required": ["model"]
+        },
+        "digest": {
+                "type":"object",
+                "properties": {
+                    "max_size": {
+                        "type":"integer"
+                    },
+                    "max_entries": {"type":"integer"},
+                    "model": {
+                            "type": "object",
+                            "properties": {
+                                "provider": {
+                                    "type": "string"
+                                },
+                                "name": {
+                                    "type": "string"
+                                },
+                                "url": {
+                                    "type": "string"
+                                },
+                                "api_key": {
+                                    "type": "string"
+                                },
+                                "timeout": {
+                                    "type": "integer"
+                                    }
+                            },
+                            "required": ["provider", "name"]
+                },
+                "required": ["max_entries","model"]
+            }
+        },
+        "agents": {
+            "type": "object",
+            "properties": {
+                "retriever": {
+                    "type": "object",
+                    "properties": {
+                        "model": {
+                            "type": "object",
+                            "properties": {
+                                "provider": {
+                                    "type": "string"
+                                },
+                                "name": {
+                                    "type": "string"
+                                },
+                                "url": {
+                                    "type": "string"
+                                },
+                                "api_key": {
+                                    "type": "string"
+                                },
+                                "timeout": {
+                                    "type": "integer"
+                                }
+                            },
+                            "required": ["provider", "name"]
+                        },
+                        "max_steps": {
+                            "type": "integer"
+                        },
+                        "top_k": {
+                            "type": "integer"
+                        },
+                        "image_analyzer": {
+                            "type": "object",
+                            "properties": {
+                                "model": {
+                                    "type": "object",
+                                    "properties": {
+                                        "provider": {
+                                            "type": "string"
+                                        },
+                                        "name": {
+                                            "type": "string"
+                                        },
+                                        "url": {
+                                            "type": "string"
+                                        },
+                                        "api_key": {
+                                            "type": "string"
+                                        },
+                                        "timeout": {
+                                            "type": "integer"
+                                            }
+                                    }
+                                }
+                            }
+                        }
+
+                    },
+                    "required": ["model","max_attempts","image_analyzer"]
+                },
+                "generator": {
+                    "type": "object",
+                    "properties": {
+                        "model": {
+                            "type": "object",
+                            "properties": {
+                                "provider": {
+                                    "type": "string"
+                                },
+                                "name": {
+                                    "type": "string"
+                                },
+                                "url": {
+                                    "type": "string"
+                                },
+                                "api_key": {
+                                    "type": "string"
+                                },
+                                "timeout": {
+                                    "type": "integer"
+                                    }
+                            },
+                            "required": ["provider", "name"]
+                        },
+                        "max_attempts": {
+                            "type": "integer"
+                        }
+
+                },
+                "required": ["model", "max_attempts"]
+            }
+        },
+        "required": ["retriever","generator"]
+    }
+}
+}

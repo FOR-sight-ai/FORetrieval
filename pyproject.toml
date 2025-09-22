@@ -1,0 +1,25 @@
+[project]
+name = "forag"
+version = "0.1.0"
+description = "FOR RAG agentic retrieval"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "coloredlogs>=15.0.1",
+    "colpali-engine>=0.3.12",
+    "jsonschema>=4.25.0",
+    "pillow>=11.3.0",
+    "pytest>=8.4.1",
+    "smolagents[litellm,telemetry,toolkit,vision]>=1.20.0",
+    "srsly>=2.5.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pre-commit>=4.2.0",
+    "ruff>=0.12.5",
+]
+pdf2image = ["pdf2image>=1.17.0"]
+ollama = ["ollama>=0.5.1"]
+mistral = ["mistralai>=1.9.3"]
+gradio = ["gradio>=5.43.1"]
