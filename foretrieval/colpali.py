@@ -397,14 +397,17 @@ class ColPaliModel:
             ):
                 doc_id = doc_ids[i] if doc_ids else self.highest_doc_id + 1
                 doc_metadata = metadata[doc_id] if metadata else None
-                self.add_to_index(
-                    item,
-                    store_collection_with_index,
-                    doc_id=doc_id,
-                    metadata=doc_metadata,
-                    batch_size=batch_size,
-                )
-                self.doc_ids_to_file_names[doc_id] = str(item)
+                try:
+                    self.add_to_index(
+                        item,
+                        store_collection_with_index,
+                        doc_id=doc_id,
+                        metadata=doc_metadata,
+                        batch_size=batch_size,
+                    )
+                    self.doc_ids_to_file_names[doc_id] = str(item)
+                except:
+                    print(f"...skipping corrupted or malformed file: {item}\n")
         else:
             if metadata is not None and len(metadata) != 1:
                 raise ValueError(
