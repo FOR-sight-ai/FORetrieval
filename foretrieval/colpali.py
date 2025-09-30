@@ -143,6 +143,7 @@ class ColPaliModel:
             )
 
         self.device = device
+        #TO DO: not sure, need to be verified
         # if device != "cuda" and not (
         #     isinstance(device, torch.device) and device.type == "cuda"
         # ):
