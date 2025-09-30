@@ -729,7 +729,11 @@ class ColPaliModel:
             req_embeddings = self.indexed_embeddings
             req_embedding_ids = list(range(len(self.indexed_embeddings)))
             # Compute scores
-            scores = self.processor.score(qs, req_embeddings, device=self.device).cpu().numpy()
+            scores = (
+                self.processor.score(qs, req_embeddings, device=self.device)
+                .cpu()
+                .numpy()
+            )
 
             # Get top k relevant pages
             top_pages = scores.argsort(axis=1)[0][-k:][::-1].tolist()
