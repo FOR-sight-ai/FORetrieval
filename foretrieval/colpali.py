@@ -143,10 +143,11 @@ class ColPaliModel:
             )
 
         self.device = device
-        if device != "cuda" and not (
-            isinstance(device, torch.device) and device.type == "cuda"
-        ):
-            self.model = self.model.to(device)
+        # if device != "cuda" and not (
+        #     isinstance(device, torch.device) and device.type == "cuda"
+        # ):
+        print(device)
+        self.model = self.model.to(device)
 
         if not load_from_index:
             self.full_document_collection = False
@@ -155,8 +156,8 @@ class ColPaliModel:
             if self.index_name is None:
                 raise ValueError("No index name specified. Cannot load from index.")
 
-            index_path = Path(index_root) / Path(self.index_name)
-            index_config = srsly.read_gzip_json(index_path / "index_config.json.gz")
+            index_path = Path(os.path.join(Path(index_root), Path(self.index_name)))
+            index_config = srsly.read_gzip_json(os.path.join(index_path, "index_config.json.gz"))
             self.full_document_collection = index_config.get(
                 "full_document_collection", False
             )
@@ -165,7 +166,7 @@ class ColPaliModel:
             self.max_image_height = index_config.get("max_image_height", None)
 
             if self.full_document_collection:
-                collection_path = index_path / "collection"
+                collection_path = Path(os.path.join(index_path, "collection"))
                 json_files = sorted(
                     collection_path.glob("*.json.gz"),
                     key=lambda x: int(x.stem.split(".")[0]),
@@ -186,7 +187,7 @@ class ColPaliModel:
                         f"Loaded {len(self.collection)} images from {len(json_files)} JSON files."
                     )
 
-            embeddings_path = index_path / "embeddings"
+            embeddings_path = Path(os.path.join(index_path, "embeddings"))
             embedding_files = sorted(
                 embeddings_path.glob("embeddings_*.pt"),
                 key=lambda x: int(x.stem.split("_")[1]),
@@ -196,7 +197,7 @@ class ColPaliModel:
                 self.indexed_embeddings.extend(torch.load(file))
 
             self.embed_id_to_doc_id = srsly.read_gzip_json(
-                index_path / "embed_id_to_doc_id.json.gz"
+                os.path.join(index_path, "embed_id_to_doc_id.json.gz")
             )
             # Restore keys to integers
             self.embed_id_to_doc_id = {
@@ -211,7 +212,7 @@ class ColPaliModel:
             try:
                 # We don't want this error out with indexes created prior to 0.0.2
                 self.doc_ids_to_file_names = srsly.read_gzip_json(
-                    index_path / "doc_ids_to_file_names.json.gz"
+                    os.path.join(index_path, "doc_ids_to_file_names.json.gz")
                 )
                 self.doc_ids_to_file_names = {
                     int(k): v for k, v in self.doc_ids_to_file_names.items()
@@ -220,7 +221,7 @@ class ColPaliModel:
                 pass
 
             # Load metadata
-            metadata_path = index_path / "metadata.json.gz"
+            metadata_path = Path(os.path.join(index_path, "metadata.json.gz"))
             if metadata_path.exists():
                 self.doc_id_to_metadata = srsly.read_gzip_json(metadata_path)
                 # Convert metadata keys to integers
@@ -260,8 +261,9 @@ class ColPaliModel:
         index_root: str = ".byaldi",
         **kwargs,
     ):
-        index_path = Path(index_root) / Path(index_path)
-        index_config = srsly.read_gzip_json(index_path / "index_config.json.gz")
+        index_path = Path(os.path.join(Path(index_root), Path(index_path)))
+        index_config = srsly.read_gzip_json(os.path.join(index_path, "index_config.json.gz"))
+        print("index_config", index_config)
 
         instance = cls(
             pretrained_model_name_or_path=index_config["model_name"],
@@ -280,17 +282,17 @@ class ColPaliModel:
         if self.index_name is None:
             raise ValueError("No index name specified. Cannot export.")
 
-        index_path = Path(self.index_root) / Path(self.index_name)
+        index_path = Path(os.path.join(Path(self.index_root), Path(self.index_name)))
         index_path.mkdir(parents=True, exist_ok=True)
 
         # Save embeddings
-        embeddings_path = index_path / "embeddings"
+        embeddings_path = Path(os.path.join(index_path, "embeddings"))
         embeddings_path.mkdir(exist_ok=True)
         num_embeddings = len(self.indexed_embeddings)
         chunk_size = 500
         for i in range(0, num_embeddings, chunk_size):
             chunk = self.indexed_embeddings[i : i + chunk_size]
-            torch.save(chunk, embeddings_path / f"embeddings_{i}.pt")
+            torch.save(chunk, os.path.join(embeddings_path, f"embeddings_{i}.pt"))
 
         # Save index config
         index_config = {
@@ -304,28 +306,28 @@ class ColPaliModel:
             "max_image_height": self.max_image_height,
             "library_version": VERSION,
         }
-        srsly.write_gzip_json(index_path / "index_config.json.gz", index_config)
+        srsly.write_gzip_json(Path(os.path.join(index_path, "index_config.json.gz")), index_config)
 
         # Save embed_id_to_doc_id mapping
         srsly.write_gzip_json(
-            index_path / "embed_id_to_doc_id.json.gz", self.embed_id_to_doc_id
+            Path(os.path.join(index_path, "embed_id_to_doc_id.json.gz")), self.embed_id_to_doc_id
         )
 
         # Save doc_ids_to_file_names
         srsly.write_gzip_json(
-            index_path / "doc_ids_to_file_names.json.gz", self.doc_ids_to_file_names
+            Path(os.path.join(index_path, "doc_ids_to_file_names.json.gz")), self.doc_ids_to_file_names
         )
 
         # Save metadata
-        srsly.write_gzip_json(index_path / "metadata.json.gz", self.doc_id_to_metadata)
+        srsly.write_gzip_json(Path(os.path.join(index_path, "metadata.json.gz")), self.doc_id_to_metadata)
 
         # Save collection if using in-memory collection
         if self.full_document_collection:
-            collection_path = index_path / "collection"
+            collection_path = Path(os.path.join(index_path, "collection"))
             collection_path.mkdir(exist_ok=True)
             for i in range(0, len(self.collection), 500):
                 chunk = dict(list(self.collection.items())[i : i + 500])
-                srsly.write_gzip_json(collection_path / f"{i}.json.gz", chunk)
+                srsly.write_gzip_json(Path(os.path.join(collection_path, f"{i}.json.gz")), chunk)
 
         if self.verbose > 0:
             print(f"Index exported to {index_path}")
@@ -357,7 +359,7 @@ class ColPaliModel:
         if index_name is None:
             raise ValueError("index_name must be specified to create a new index.")
 
-        index_path = Path(self.index_root) / Path(index_name)
+        index_path = Path(os.path.join(Path(self.index_root), Path(index_name)))
         if index_path.exists():
             if overwrite is False:
                 logger.warning(
@@ -397,17 +399,17 @@ class ColPaliModel:
             ):
                 doc_id = doc_ids[i] if doc_ids else self.highest_doc_id + 1
                 doc_metadata = metadata[doc_id] if metadata else None
-                try:
-                    self.add_to_index(
-                        item,
-                        store_collection_with_index,
-                        doc_id=doc_id,
-                        metadata=doc_metadata,
-                        batch_size=batch_size,
-                    )
-                    self.doc_ids_to_file_names[doc_id] = str(item)
-                except:
-                    print(f"...skipping corrupted or malformed file: {item}\n")
+                # try:
+                self.add_to_index(
+                    item,
+                    store_collection_with_index,
+                    doc_id=doc_id,
+                    metadata=doc_metadata,
+                    batch_size=batch_size,
+                )
+                self.doc_ids_to_file_names[doc_id] = str(item)
+                # except:
+                #     print(f"...skipping corrupted or malformed file: {item}\n")
         else:
             if metadata is not None and len(metadata) != 1:
                 raise ValueError(
@@ -727,7 +729,7 @@ class ColPaliModel:
             req_embeddings = self.indexed_embeddings
             req_embedding_ids = list(range(len(self.indexed_embeddings)))
             # Compute scores
-            scores = self.processor.score(qs, req_embeddings).cpu().numpy()
+            scores = self.processor.score(qs, req_embeddings, device=self.device).cpu().numpy()
 
             # Get top k relevant pages
             top_pages = scores.argsort(axis=1)[0][-k:][::-1].tolist()
