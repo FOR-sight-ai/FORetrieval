@@ -143,11 +143,10 @@ class ColPaliModel:
             )
 
         self.device = device
-        #TO DO: not sure, need to be verified
+        # TODO: not sure, need to be verified
         # if device != "cuda" and not (
         #     isinstance(device, torch.device) and device.type == "cuda"
         # ):
-        print(device)
         self.model = self.model.to(device)
 
         if not load_from_index:
@@ -158,7 +157,9 @@ class ColPaliModel:
                 raise ValueError("No index name specified. Cannot load from index.")
 
             index_path = Path(os.path.join(Path(index_root), Path(self.index_name)))
-            index_config = srsly.read_gzip_json(os.path.join(index_path, "index_config.json.gz"))
+            index_config = srsly.read_gzip_json(
+                os.path.join(index_path, "index_config.json.gz")
+            )
             self.full_document_collection = index_config.get(
                 "full_document_collection", False
             )
@@ -263,8 +264,9 @@ class ColPaliModel:
         **kwargs,
     ):
         index_path = Path(os.path.join(Path(index_root), Path(index_path)))
-        index_config = srsly.read_gzip_json(os.path.join(index_path, "index_config.json.gz"))
-        print("index_config", index_config)
+        index_config = srsly.read_gzip_json(
+            os.path.join(index_path, "index_config.json.gz")
+        )
 
         instance = cls(
             pretrained_model_name_or_path=index_config["model_name"],
@@ -307,20 +309,26 @@ class ColPaliModel:
             "max_image_height": self.max_image_height,
             "library_version": VERSION,
         }
-        srsly.write_gzip_json(Path(os.path.join(index_path, "index_config.json.gz")), index_config)
+        srsly.write_gzip_json(
+            Path(os.path.join(index_path, "index_config.json.gz")), index_config
+        )
 
         # Save embed_id_to_doc_id mapping
         srsly.write_gzip_json(
-            Path(os.path.join(index_path, "embed_id_to_doc_id.json.gz")), self.embed_id_to_doc_id
+            Path(os.path.join(index_path, "embed_id_to_doc_id.json.gz")),
+            self.embed_id_to_doc_id,
         )
 
         # Save doc_ids_to_file_names
         srsly.write_gzip_json(
-            Path(os.path.join(index_path, "doc_ids_to_file_names.json.gz")), self.doc_ids_to_file_names
+            Path(os.path.join(index_path, "doc_ids_to_file_names.json.gz")),
+            self.doc_ids_to_file_names,
         )
 
         # Save metadata
-        srsly.write_gzip_json(Path(os.path.join(index_path, "metadata.json.gz")), self.doc_id_to_metadata)
+        srsly.write_gzip_json(
+            Path(os.path.join(index_path, "metadata.json.gz")), self.doc_id_to_metadata
+        )
 
         # Save collection if using in-memory collection
         if self.full_document_collection:
@@ -328,7 +336,9 @@ class ColPaliModel:
             collection_path.mkdir(exist_ok=True)
             for i in range(0, len(self.collection), 500):
                 chunk = dict(list(self.collection.items())[i : i + 500])
-                srsly.write_gzip_json(Path(os.path.join(collection_path, f"{i}.json.gz")), chunk)
+                srsly.write_gzip_json(
+                    Path(os.path.join(collection_path, f"{i}.json.gz")), chunk
+                )
 
         if self.verbose > 0:
             print(f"Index exported to {index_path}")
