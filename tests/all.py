@@ -2,7 +2,7 @@ from pathlib import Path
 
 from colpali_engine.utils.torch_utils import get_torch_device
 
-from byaldi import RAGMultiModalModel
+from foretrieval import MultiModalRetrieverModel
 
 device = get_torch_device("auto")
 print(f"Using device: {device}")
@@ -15,7 +15,9 @@ def test_single_pdf():
     print("Testing single PDF indexing and retrieval...")
 
     # Initialize the model
-    model = RAGMultiModalModel.from_pretrained("vidore/colpali-v1.2", device=device)
+    model = MultiModalRetrieverModel.from_pretrained(
+        "vidore/colpali-v1.2", device=device
+    )
 
     if not Path("docs/attention.pdf").is_file():
         raise FileNotFoundError(
@@ -47,15 +49,15 @@ def test_single_pdf():
 
         # Check if the expected page (6 for positional encoding) is in the top results
         if "positional encoding" in query.lower():
-            assert any(
-                r.page_num == 6 for r in results
-            ), "Expected page 6 for positional encoding query"
+            assert any(r.page_num == 6 for r in results), (
+                "Expected page 6 for positional encoding query"
+            )
 
         # Check if the expected pages (8 and 9 for BLEU score) are in the top results
         if "bleu score" in query.lower():
-            assert any(
-                r.page_num in [8, 9] for r in results
-            ), "Expected pages 8 or 9 for BLEU score query"
+            assert any(r.page_num in [8, 9] for r in results), (
+                "Expected pages 8 or 9 for BLEU score query"
+            )
 
     print("Single PDF test completed.")
 
@@ -64,7 +66,7 @@ def test_multi_document():
     print("\nTesting multi-document indexing and retrieval...")
 
     # Initialize the model
-    model = RAGMultiModalModel.from_pretrained("vidore/colpali")
+    model = MultiModalRetrieverModel.from_pretrained("vidore/colpali")
 
     if not Path("docs/attention.pdf").is_file():
         raise FileNotFoundError(
@@ -100,15 +102,15 @@ def test_multi_document():
 
         # Check if the expected page (6 for positional encoding) is in the top results
         if "positional encoding" in query.lower():
-            assert any(
-                r.page_num == 6 for r in results
-            ), "Expected page 6 for positional encoding query"
+            assert any(r.page_num == 6 for r in results), (
+                "Expected page 6 for positional encoding query"
+            )
 
         # Check if the expected pages (8 and 9 for BLEU score) are in the top results
         if "bleu score" in query.lower():
-            assert any(
-                r.page_num in [8, 9] for r in results
-            ), "Expected pages 8 or 9 for BLEU score query"
+            assert any(r.page_num in [8, 9] for r in results), (
+                "Expected pages 8 or 9 for BLEU score query"
+            )
 
     print("Multi-document test completed.")
 
@@ -117,7 +119,7 @@ def test_add_to_index():
     print("\nTesting adding to an existing index...")
 
     # Load the existing index
-    model = RAGMultiModalModel.from_index("multi_doc_index")
+    model = MultiModalRetrieverModel.from_index("multi_doc_index")
 
     # Add a new document to the index
     model.add_to_index(
@@ -142,15 +144,15 @@ def test_add_to_index():
 
         # Check if the expected page (6 for positional encoding) is in the top results
         if "positional encoding" in query.lower():
-            assert any(
-                r.page_num == 6 for r in results
-            ), "Expected page 6 for positional encoding query"
+            assert any(r.page_num == 6 for r in results), (
+                "Expected page 6 for positional encoding query"
+            )
 
         # Check if the expected pages (8 and 9 for BLEU score) are in the top results
         if "bleu score" in query.lower():
-            assert any(
-                r.page_num in [8, 9] for r in results
-            ), "Expected pages 8 or 9 for BLEU score query"
+            assert any(r.page_num in [8, 9] for r in results), (
+                "Expected pages 8 or 9 for BLEU score query"
+            )
 
     print("Add to index test completed.")
 

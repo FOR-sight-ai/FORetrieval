@@ -1,7 +1,7 @@
 _all__ = []
 
 try:
-    from byaldi.integrations._langchain import ByaldiLangChainRetriever
+    from foretrieval.integrations._langchain import FORetrievalLangChain
 
     _all__.append("ByaldiLangChainRetriever")
 except ImportError:

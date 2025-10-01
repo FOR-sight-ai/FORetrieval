@@ -1,21 +1,32 @@
+import base64
+import io
+import logging
 import os
 import shutil
 import tempfile
-from importlib.metadata import version
 from pathlib import Path
 from typing import Dict, List, Optional, Union, cast
 
 import srsly
 import torch
-from colpali_engine.models import ColPali, ColPaliProcessor, ColQwen2, ColQwen2Processor
+from colpali_engine.models import (
+    ColPali,
+    ColPaliProcessor,
+    ColQwen2,
+    ColQwen2_5,
+    ColQwen2_5_Processor,
+    ColQwen2Processor,
+)
 from pdf2image import convert_from_path
 from PIL import Image
 from tqdm import tqdm
 from .file_to_pdf import _convert_to_pdf
 from .objects import Result
 
-# Import version directly from the package metadata
-VERSION = version("Byaldi")
+VERSION = "0.0.1"
+
+# set the name for logging
+logger = logging.getLogger(__name__)
 
 
 class ColPaliModel:
@@ -49,10 +60,12 @@ class ColPaliModel:
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
         self.model_name = self.pretrained_model_name_or_path
         self.n_gpu = torch.cuda.device_count() if n_gpu == -1 else n_gpu
-        device = (
-            device or (
-                "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-            )
+        device = device or (
+            "cuda"
+            if torch.cuda.is_available()
+            else "mps"
+            if torch.backends.mps.is_available()
+            else "cpu"
         )
         self.index_name = index_name
         self.verbose = verbose
@@ -68,6 +81,18 @@ class ColPaliModel:
 
         if "colpali" in pretrained_model_name_or_path.lower():
             self.model = ColPali.from_pretrained(
+                self.pretrained_model_name_or_path,
+                torch_dtype=torch.bfloat16,
+                device_map=(
+                    "cuda"
+                    if device == "cuda"
+                    or (isinstance(device, torch.device) and device.type == "cuda")
+                    else None
+                ),
+                token=kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN"),
+            )
+        elif "colqwen2.5" in pretrained_model_name_or_path.lower():
+            self.model = ColQwen2_5.from_pretrained(
                 self.pretrained_model_name_or_path,
                 torch_dtype=torch.bfloat16,
                 device_map=(
@@ -100,6 +125,14 @@ class ColPaliModel:
                     token=kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN"),
                 ),
             )
+        elif "colqwen2.5" in pretrained_model_name_or_path.lower():
+            self.processor = cast(
+                ColQwen2_5_Processor,
+                ColQwen2_5_Processor.from_pretrained(
+                    self.pretrained_model_name_or_path,
+                    token=kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN"),
+                ),
+            )
         elif "colqwen2" in pretrained_model_name_or_path.lower():
             self.processor = cast(
                 ColQwen2Processor,
@@ -110,10 +143,11 @@ class ColPaliModel:
             )
 
         self.device = device
-        if device != "cuda" and not (
-            isinstance(device, torch.device) and device.type == "cuda"
-        ):
-            self.model = self.model.to(device)
+        # TODO: not sure, need to be verified
+        # if device != "cuda" and not (
+        #     isinstance(device, torch.device) and device.type == "cuda"
+        # ):
+        self.model = self.model.to(device)
 
         if not load_from_index:
             self.full_document_collection = False
@@ -122,8 +156,10 @@ class ColPaliModel:
             if self.index_name is None:
                 raise ValueError("No index name specified. Cannot load from index.")
 
-            index_path = Path(index_root) / Path(self.index_name)
-            index_config = srsly.read_gzip_json(index_path / "index_config.json.gz")
+            index_path = Path(os.path.join(Path(index_root), Path(self.index_name)))
+            index_config = srsly.read_gzip_json(
+                os.path.join(index_path, "index_config.json.gz")
+            )
             self.full_document_collection = index_config.get(
                 "full_document_collection", False
             )
@@ -132,7 +168,7 @@ class ColPaliModel:
             self.max_image_height = index_config.get("max_image_height", None)
 
             if self.full_document_collection:
-                collection_path = index_path / "collection"
+                collection_path = Path(os.path.join(index_path, "collection"))
                 json_files = sorted(
                     collection_path.glob("*.json.gz"),
                     key=lambda x: int(x.stem.split(".")[0]),
@@ -153,7 +189,7 @@ class ColPaliModel:
                         f"Loaded {len(self.collection)} images from {len(json_files)} JSON files."
                     )
 
-            embeddings_path = index_path / "embeddings"
+            embeddings_path = Path(os.path.join(index_path, "embeddings"))
             embedding_files = sorted(
                 embeddings_path.glob("embeddings_*.pt"),
                 key=lambda x: int(x.stem.split("_")[1]),
@@ -163,7 +199,7 @@ class ColPaliModel:
                 self.indexed_embeddings.extend(torch.load(file))
 
             self.embed_id_to_doc_id = srsly.read_gzip_json(
-                index_path / "embed_id_to_doc_id.json.gz"
+                os.path.join(index_path, "embed_id_to_doc_id.json.gz")
             )
             # Restore keys to integers
             self.embed_id_to_doc_id = {
@@ -178,7 +214,7 @@ class ColPaliModel:
             try:
                 # We don't want this error out with indexes created prior to 0.0.2
                 self.doc_ids_to_file_names = srsly.read_gzip_json(
-                    index_path / "doc_ids_to_file_names.json.gz"
+                    os.path.join(index_path, "doc_ids_to_file_names.json.gz")
                 )
                 self.doc_ids_to_file_names = {
                     int(k): v for k, v in self.doc_ids_to_file_names.items()
@@ -187,7 +223,7 @@ class ColPaliModel:
                 pass
 
             # Load metadata
-            metadata_path = index_path / "metadata.json.gz"
+            metadata_path = Path(os.path.join(index_path, "metadata.json.gz"))
             if metadata_path.exists():
                 self.doc_id_to_metadata = srsly.read_gzip_json(metadata_path)
                 # Convert metadata keys to integers
@@ -227,8 +263,10 @@ class ColPaliModel:
         index_root: str = ".byaldi",
         **kwargs,
     ):
-        index_path = Path(index_root) / Path(index_path)
-        index_config = srsly.read_gzip_json(index_path / "index_config.json.gz")
+        index_path = Path(os.path.join(Path(index_root), Path(index_path)))
+        index_config = srsly.read_gzip_json(
+            os.path.join(index_path, "index_config.json.gz")
+        )
 
         instance = cls(
             pretrained_model_name_or_path=index_config["model_name"],
@@ -247,17 +285,17 @@ class ColPaliModel:
         if self.index_name is None:
             raise ValueError("No index name specified. Cannot export.")
 
-        index_path = Path(self.index_root) / Path(self.index_name)
+        index_path = Path(os.path.join(Path(self.index_root), Path(self.index_name)))
         index_path.mkdir(parents=True, exist_ok=True)
 
         # Save embeddings
-        embeddings_path = index_path / "embeddings"
+        embeddings_path = Path(os.path.join(index_path, "embeddings"))
         embeddings_path.mkdir(exist_ok=True)
         num_embeddings = len(self.indexed_embeddings)
         chunk_size = 500
         for i in range(0, num_embeddings, chunk_size):
             chunk = self.indexed_embeddings[i : i + chunk_size]
-            torch.save(chunk, embeddings_path / f"embeddings_{i}.pt")
+            torch.save(chunk, os.path.join(embeddings_path, f"embeddings_{i}.pt"))
 
         # Save index config
         index_config = {
@@ -271,28 +309,36 @@ class ColPaliModel:
             "max_image_height": self.max_image_height,
             "library_version": VERSION,
         }
-        srsly.write_gzip_json(index_path / "index_config.json.gz", index_config)
+        srsly.write_gzip_json(
+            Path(os.path.join(index_path, "index_config.json.gz")), index_config
+        )
 
         # Save embed_id_to_doc_id mapping
         srsly.write_gzip_json(
-            index_path / "embed_id_to_doc_id.json.gz", self.embed_id_to_doc_id
+            Path(os.path.join(index_path, "embed_id_to_doc_id.json.gz")),
+            self.embed_id_to_doc_id,
         )
 
         # Save doc_ids_to_file_names
         srsly.write_gzip_json(
-            index_path / "doc_ids_to_file_names.json.gz", self.doc_ids_to_file_names
+            Path(os.path.join(index_path, "doc_ids_to_file_names.json.gz")),
+            self.doc_ids_to_file_names,
         )
 
         # Save metadata
-        srsly.write_gzip_json(index_path / "metadata.json.gz", self.doc_id_to_metadata)
+        srsly.write_gzip_json(
+            Path(os.path.join(index_path, "metadata.json.gz")), self.doc_id_to_metadata
+        )
 
         # Save collection if using in-memory collection
         if self.full_document_collection:
-            collection_path = index_path / "collection"
+            collection_path = Path(os.path.join(index_path, "collection"))
             collection_path.mkdir(exist_ok=True)
             for i in range(0, len(self.collection), 500):
                 chunk = dict(list(self.collection.items())[i : i + 500])
-                srsly.write_gzip_json(collection_path / f"{i}.json.gz", chunk)
+                srsly.write_gzip_json(
+                    Path(os.path.join(collection_path, f"{i}.json.gz")), chunk
+                )
 
         if self.verbose > 0:
             print(f"Index exported to {index_path}")
@@ -307,7 +353,8 @@ class ColPaliModel:
         metadata: Optional[List[Dict[str, Union[str, int]]]] = None,
         max_image_width: Optional[int] = None,
         max_image_height: Optional[int] = None,
-    ) -> Dict[int, str]:
+        batch_size: int = 1,
+    ) -> Union[Dict[int, str], None]:
         if (
             self.index_name is not None
             and (index_name is None or self.index_name == index_name)
@@ -322,13 +369,11 @@ class ColPaliModel:
             return None
         if index_name is None:
             raise ValueError("index_name must be specified to create a new index.")
-        if store_collection_with_index:
-            self.full_document_collection = True
 
-        index_path = Path(self.index_root) / Path(index_name)
+        index_path = Path(os.path.join(Path(self.index_root), Path(index_name)))
         if index_path.exists():
             if overwrite is False:
-                raise ValueError(
+                logger.warning(
                     f"An index named {index_name} already exists.",
                     "Use overwrite=True to delete the existing index and build a new one.",
                     "Exiting indexing without doing anything...",
@@ -340,6 +385,8 @@ class ColPaliModel:
                 )
                 shutil.rmtree(index_path)
 
+        if store_collection_with_index:
+            self.full_document_collection = True
         self.index_name = index_name
         self.max_image_width = max_image_width
         self.max_image_height = max_image_height
@@ -358,17 +405,22 @@ class ColPaliModel:
                 raise ValueError(
                     f"Number of metadata entries ({len(metadata)}) does not match number of documents ({len(items)})"
                 )
-            for i, item in enumerate(items):
-                print(f"Indexing file: {item}")
+            for i, item in tqdm(
+                enumerate(items), total=len(items), desc="Indexing files"
+            ):
                 doc_id = doc_ids[i] if doc_ids else self.highest_doc_id + 1
                 doc_metadata = metadata[doc_id] if metadata else None
+                # try:
                 self.add_to_index(
                     item,
                     store_collection_with_index,
                     doc_id=doc_id,
                     metadata=doc_metadata,
+                    batch_size=batch_size,
                 )
                 self.doc_ids_to_file_names[doc_id] = str(item)
+                # except:
+                #     print(f"...skipping corrupted or malformed file: {item}\n")
         else:
             if metadata is not None and len(metadata) != 1:
                 raise ValueError(
@@ -385,6 +437,9 @@ class ColPaliModel:
             self.doc_ids_to_file_names[doc_id] = str(input_path)
 
         self._export_index()
+        if self.highest_doc_id == -1:
+            logger.warning("No documents were indexed.")
+
         return self.doc_ids_to_file_names
 
     def add_to_index(
@@ -393,6 +448,7 @@ class ColPaliModel:
         store_collection_with_index: bool,
         doc_id: Optional[Union[int, List[int]]] = None,
         metadata: Optional[List[Dict[str, Union[str, int]]]] = None,
+        batch_size: int = 1,
     ) -> Dict[int, str]:
         if self.index_name is None:
             raise ValueError(
@@ -440,6 +496,7 @@ class ColPaliModel:
                         store_collection_with_index,
                         current_doc_id,
                         current_metadata,
+                        batch_size,
                     )
                 else:
                     self._process_and_add_to_index(
@@ -447,6 +504,7 @@ class ColPaliModel:
                         store_collection_with_index,
                         current_doc_id,
                         current_metadata,
+                        batch_size,
                     )
                 self.doc_ids_to_file_names[current_doc_id] = str(item_path)
             elif isinstance(item, Image.Image):
@@ -466,12 +524,13 @@ class ColPaliModel:
         store_collection_with_index: bool,
         base_doc_id: int,
         metadata: Optional[Dict[str, Union[str, int]]],
+        batch_size: int,
     ):
         for i, item in enumerate(directory.iterdir()):
             print(f"Indexing file: {item}")
             current_doc_id = base_doc_id + i
             self._process_and_add_to_index(
-                item, store_collection_with_index, current_doc_id, metadata
+                item, store_collection_with_index, current_doc_id, metadata, batch_size
             )
             self.doc_ids_to_file_names[current_doc_id] = str(item)
 
@@ -481,6 +540,7 @@ class ColPaliModel:
         store_collection_with_index: bool,
         doc_id: Union[str, int],
         metadata: Optional[Dict[str, Union[str, int]]] = None,
+        batch_size: int = 1,
     ):
         """Process and add an image or any file (converted to PDF if needed) to the index."""
         if isinstance(item, Path):
@@ -547,96 +607,175 @@ class ColPaliModel:
                 )
             image = image.resize((new_width, new_height), Image.LANCZOS)
 
-            buffered = io.BytesIO()
-            image.save(buffered, format="PNG")
-            img_str = base64.b64encode(buffered.getvalue()).decode()
+        buffered = io.BytesIO()
+        image.save(buffered, format="PNG")
+        img_str = base64.b64encode(buffered.getvalue()).decode()
+        return img_str
 
-            self.collection[int(embed_id)] = img_str
+    def _add_to_index(
+        self,
+        images: Union[Image.Image, List[Image.Image]],
+        store_collection_with_index: bool,
+        doc_id: Union[str, int],
+        page_ids: Union[int, List[int]] = 1,
+        metadata: Optional[Dict[str, Union[str, int]]] = None,
+    ):
+        # Convert single image to list for uniform processing
+        if isinstance(images, Image.Image):
+            images = [images]
+
+        # Convert single page_id to list for uniform processing
+        if isinstance(page_ids, int):
+            page_ids = [page_ids]
+
+        # Validate input lengths
+        if len(images) != len(page_ids):
+            raise ValueError(
+                f"Number of images ({len(images)}) does not match number of page_ids ({len(page_ids)})"
+            )
+
+        # Check for existing entries
+        for page_id in page_ids:
+            if any(
+                entry["doc_id"] == doc_id and entry["page_id"] == page_id
+                for entry in self.embed_id_to_doc_id.values()
+            ):
+                raise ValueError(
+                    f"Document ID {doc_id} with page ID {page_id} already exists in the index"
+                )
+
+        # Process images in batches
+        processed_images = self.processor.process_images(images)
+
+        # Generate embeddings
+        with torch.inference_mode():
+            processed_images = {
+                k: v.to(self.device).to(
+                    self.model.dtype
+                    if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
+                    else v.dtype
+                )
+                for k, v in processed_images.items()
+            }
+            embeddings = self.model(**processed_images)
+
+        # Add to index
+        embeddings_list = list(torch.unbind(embeddings.to("cpu")))
+        for i, (embedding, page_id) in enumerate(zip(embeddings_list, page_ids)):
+            embed_id = len(self.indexed_embeddings)
+            self.indexed_embeddings.append(embedding)
+            self.embed_id_to_doc_id[embed_id] = {
+                "doc_id": doc_id,
+                "page_id": int(page_id),
+            }
+
+            if store_collection_with_index:
+                img_str = self._post_process_image(images[i])
+                self.collection[int(embed_id)] = img_str
+
+        # Update highest_doc_id
+        self.highest_doc_id = max(
+            self.highest_doc_id,
+            int(doc_id) if isinstance(doc_id, int) else self.highest_doc_id,
+        )
 
         # Add metadata
         if metadata:
             self.doc_id_to_metadata[doc_id] = metadata
 
         if self.verbose > 0:
-            print(f"Added page {page_id} of document {doc_id} to index.")
+            print(f"Added {len(images)} pages of document {doc_id} to index.")
 
     def remove_from_index(self):
         raise NotImplementedError("This method is not implemented yet.")
 
-    def filter_embeddings(self,filter_metadata:Dict[str,str]):
+    def filter_embeddings(self, filter_metadata: Dict[str, str]):
         req_doc_ids = []
-        for idx,metadata_dict in self.doc_id_to_metadata.items():
-            for metadata_key,metadata_value in metadata_dict.items():
+        for idx, metadata_dict in self.doc_id_to_metadata.items():
+            for metadata_key, metadata_value in metadata_dict.items():
                 if metadata_key in filter_metadata:
                     if filter_metadata[metadata_key] == metadata_value:
                         req_doc_ids.append(idx)
-                        
-        req_embedding_ids = [eid for eid,doc in self.embed_id_to_doc_id.items() if doc['doc_id'] in req_doc_ids]
-        req_embeddings = [ie for idx,ie in enumerate(self.indexed_embeddings) if idx in req_embedding_ids]
+
+        req_embedding_ids = [
+            eid
+            for eid, doc in self.embed_id_to_doc_id.items()
+            if doc["doc_id"] in req_doc_ids
+        ]
+        req_embeddings = [
+            ie
+            for idx, ie in enumerate(self.indexed_embeddings)
+            if idx in req_embedding_ids
+        ]
 
         return req_embeddings, req_embedding_ids
-    
+
     def search(
         self,
-        query: Union[str, List[str]],
+        query: str,
         k: int = 10,
-        filter_metadata: Optional[Dict[str,str]] = None,
+        filter_metadata: Optional[Dict[str, str]] = None,
         return_base64_results: Optional[bool] = None,
-    ) -> Union[List[Result], List[List[Result]]]:
+    ) -> List[Result]:
         # Set default value for return_base64_results if not provided
         if return_base64_results is None:
             return_base64_results = bool(self.collection)
 
-        valid_metadata_keys = list(self.doc_id_to_metadata.values())
         # Ensure k is not larger than the number of indexed documents
         k = min(k, len(self.indexed_embeddings))
 
-        # Process query/queries
-        if isinstance(query, str):
-            queries = [query]
-        else:
-            queries = query
-
-        results = []
-        for q in queries:
-            # Process query
-            with torch.inference_mode():
-                batch_query = self.processor.process_queries([q])
-                batch_query = {k: v.to(self.device).to(self.model.dtype if v.dtype in [torch.float16, torch.bfloat16, torch.float32] else v.dtype) for k, v in batch_query.items()}
-                embeddings_query = self.model(**batch_query)
+        # Process query
+        with torch.inference_mode():
+            batch_query = self.processor.process_queries([query])
+            batch_query = {
+                k: v.to(self.device).to(
+                    self.model.dtype
+                    if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
+                    else v.dtype
+                )
+                for k, v in batch_query.items()
+            }
+            embeddings_query = self.model(**batch_query)
             qs = list(torch.unbind(embeddings_query.to("cpu")))
-            if not filter_metadata:
-                req_embeddings = self.indexed_embeddings
-            else:
-                req_embeddings, req_embedding_ids = self.filter_embeddings(filter_metadata=filter_metadata) 
+
+        # Get embeddings to search against
+        if filter_metadata:
+            req_embeddings, req_embedding_ids = self.filter_embeddings(filter_metadata)
+        else:
+            req_embeddings = self.indexed_embeddings
+            req_embedding_ids = list(range(len(self.indexed_embeddings)))
             # Compute scores
-            scores = self.processor.score(qs,req_embeddings).cpu().numpy()
+            scores = (
+                self.processor.score(qs, req_embeddings, device=self.device)
+                .cpu()
+                .numpy()
+            )
 
             # Get top k relevant pages
             top_pages = scores.argsort(axis=1)[0][-k:][::-1].tolist()
 
             # Create Result objects
-            query_results = []
-            for embed_id in top_pages:
-                if filter_metadata:
-                    adjusted_embed_id = req_embedding_ids[embed_id]
-                else:
-                    adjusted_embed_id = int(embed_id)
-                doc_info = self.embed_id_to_doc_id[adjusted_embed_id]
-                result = Result(
-                    doc_id=doc_info["doc_id"],
-                    page_num=int(doc_info["page_id"]),
-                    score=float(scores[0][int(embed_id)]),
-                    metadata=self.doc_id_to_metadata.get(int(doc_info["doc_id"]), {}),
-                    base64=self.collection.get(adjusted_embed_id)
-                    if return_base64_results
-                    else None,
-                )
-                query_results.append(result)
+        results = []
+        for embed_id in top_pages:
+            adjusted_embed_id = req_embedding_ids[embed_id]
+            doc_info = self.embed_id_to_doc_id[adjusted_embed_id]
 
-            results.append(query_results)
+            result = Result(
+                doc_id=doc_info["doc_id"],
+                page_num=int(doc_info["page_id"]),
+                score=float(scores[0][embed_id]),
+                metadata=self.doc_id_to_metadata.get(int(doc_info["doc_id"]), {}),
+                base64=self.collection.get(adjusted_embed_id)
+                if return_base64_results
+                else None,
+            )
+            results.append(result)
 
-        return results[0] if isinstance(query, str) else results
+        if return_base64_results:
+            for result in results:
+                self.fetch_result_img(result)
+
+        return results
 
     def encode_image(
         self, input_data: Union[str, Image.Image, List[Union[str, Image.Image]]]
@@ -685,7 +824,14 @@ class ColPaliModel:
 
         with torch.inference_mode():
             batch = self.processor.process_images(images)
-            batch = {k: v.to(self.device).to(self.model.dtype if v.dtype in [torch.float16, torch.bfloat16, torch.float32] else v.dtype) for k, v in batch.items()}
+            batch = {
+                k: v.to(self.device).to(
+                    self.model.dtype
+                    if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
+                    else v.dtype
+                )
+                for k, v in batch.items()
+            }
             embeddings = self.model(**batch)
 
         return embeddings.cpu()
@@ -706,10 +852,45 @@ class ColPaliModel:
 
         with torch.inference_mode():
             batch = self.processor.process_queries(query)
-            batch = {k: v.to(self.device).to(self.model.dtype if v.dtype in [torch.float16, torch.bfloat16, torch.float32] else v.dtype) for k, v in batch.items()}
+            batch = {
+                k: v.to(self.device).to(
+                    self.model.dtype
+                    if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
+                    else v.dtype
+                )
+                for k, v in batch.items()
+            }
             embeddings = self.model(**batch)
 
         return embeddings.cpu()
 
     def get_doc_ids_to_file_names(self):
         return self.doc_ids_to_file_names
+
+    def fetch_result_img(self, result: Result) -> Result:
+        """
+        Get the image of the result at a given page and put it in the result object.
+        Args:
+            result (Result): The result object.
+            page_id (int): The page id of the result.
+        Returns:
+            Result: The result object with the image of the result at the given page.
+        """
+        if not result.base64:
+            doc_id = result.doc_id
+            file_name = self.doc_ids_to_file_names[doc_id]
+            # get the image from the file using pdf2image
+            with tempfile.TemporaryDirectory() as path:
+                images = convert_from_path(
+                    file_name,
+                    thread_count=os.cpu_count() - 1,
+                    first_page=result.page_num,
+                    last_page=result.page_num,
+                    paths_only=True,
+                    output_folder=path,
+                )
+                image = Image.open(images[0])
+                img_str = self._post_process_image(image)
+
+            result.base64 = img_str
+        return result
