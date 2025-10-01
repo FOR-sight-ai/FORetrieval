@@ -4,14 +4,17 @@ import tempfile
 from importlib.metadata import version
 from pathlib import Path
 from typing import Dict, List, Optional, Union, cast
+import tempfile
+import subprocess
 
 import srsly
 import torch
 from colpali_engine.models import ColPali, ColPaliProcessor, ColQwen2, ColQwen2Processor
 from pdf2image import convert_from_path
 from PIL import Image
-
-from byaldi.objects import Result
+from tqdm import tqdm
+from .file_to_pdf import _convert_to_pdf
+from .objects import Result
 
 # Import version directly from the package metadata
 VERSION = version("Byaldi")
@@ -481,39 +484,49 @@ class ColPaliModel:
         doc_id: Union[str, int],
         metadata: Optional[Dict[str, Union[str, int]]] = None,
     ):
-        """TODO: THERE ARE TOO MANY FUNCTIONS DOING THINGS HERE. I blame Claude, but this is temporary anyway."""
+        """Process and add an image or any file (converted to PDF if needed) to the index."""
         if isinstance(item, Path):
             if item.suffix.lower() == ".pdf":
-                with tempfile.TemporaryDirectory() as path:
-                    images = convert_from_path(
-                        item,
-                        thread_count=os.cpu_count() - 1,
-                        output_folder=path,
-                        paths_only=True,
-                    )
-                    for i, image_path in enumerate(images):
-                        image = Image.open(image_path)
-                        self._add_to_index(
-                            image,
-                            store_collection_with_index,
-                            doc_id,
-                            page_id=i + 1,
-                            metadata=metadata,
-                        )
+                pdf_file = item.resolve()
             elif item.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp"]:
                 image = Image.open(item)
-                self._add_to_index(
-                    image, store_collection_with_index, doc_id, metadata=metadata
-                )
+                self._add_to_index(image, store_collection_with_index, doc_id, metadata=metadata)
+                return
             else:
-                raise ValueError(f"Unsupported input type: {item.suffix}")
+                # 🔄 conversion automatique vers PDF
+                pdf_file = _convert_to_pdf(item)
+                if pdf_file is None:
+                    return  # on skip ce fichier
+
+            # pipeline normal PDF → images
+            with tempfile.TemporaryDirectory() as path:
+                images = convert_from_path(
+                    pdf_file,
+                    thread_count=os.cpu_count() - 1,
+                    output_folder=path,
+                    paths_only=True,
+                )
+                for i in range(0, len(images), batch_size):
+                    batch_images = []
+                    batch_page_ids = []
+                    for j in range(i, min(i + batch_size, len(images))):
+                        image_path = images[j]
+                        image = Image.open(image_path)
+                        batch_images.append(image)
+                        batch_page_ids.append(j + 1)
+                    self._add_to_index(
+                        batch_images,
+                        store_collection_with_index,
+                        doc_id,
+                        page_ids=batch_page_ids,
+                        metadata=metadata,
+                    )
         elif isinstance(item, Image.Image):
-            self._add_to_index(
-                item, store_collection_with_index, doc_id, metadata=metadata
-            )
+            self._add_to_index(item, store_collection_with_index, doc_id, metadata=metadata)
+            return
         else:
             raise ValueError(f"Unsupported input type: {type(item)}")
-
+        
     def _add_to_index(
         self,
         image: Image.Image,
