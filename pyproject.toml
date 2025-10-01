@@ -34,7 +34,7 @@ dependencies = [
     "ninja",
     "pdf2image",
     "srsly",
-    "torch",
+    "torch<=2.5.1",
     "transformers>=4.42.0",
 ]
 

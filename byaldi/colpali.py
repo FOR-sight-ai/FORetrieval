@@ -4,8 +4,6 @@ import tempfile
 from importlib.metadata import version
 from pathlib import Path
 from typing import Dict, List, Optional, Union, cast
-import tempfile
-import subprocess
 
 import srsly
 import torch
@@ -526,68 +524,28 @@ class ColPaliModel:
             return
         else:
             raise ValueError(f"Unsupported input type: {type(item)}")
-        
-    def _add_to_index(
-        self,
-        image: Image.Image,
-        store_collection_with_index: bool,
-        doc_id: Union[str, int],
-        page_id: int = 1,
-        metadata: Optional[Dict[str, Union[str, int]]] = None,
-    ):
-        if any(
-            entry["doc_id"] == doc_id and entry["page_id"] == page_id
-            for entry in self.embed_id_to_doc_id.values()
-        ):
-            raise ValueError(
-                f"Document ID {doc_id} with page ID {page_id} already exists in the index"
-            )
 
-        processed_image = self.processor.process_images([image])
-
-        # Generate embedding
-        with torch.inference_mode():
-            processed_image = {
-                k: v.to(self.device).to(self.model.dtype if v.dtype in [torch.float16, torch.bfloat16, torch.float32] else v.dtype)
-                for k, v in processed_image.items()
-            }
-            embedding = self.model(**processed_image)
-
-        # Add to index
-        embed_id = len(self.indexed_embeddings)
-        self.indexed_embeddings.extend(list(torch.unbind(embedding.to("cpu"))))
-        self.embed_id_to_doc_id[embed_id] = {"doc_id": doc_id, "page_id": int(page_id)}
-
-        # Update highest_doc_id
-        self.highest_doc_id = max(
-            self.highest_doc_id,
-            int(doc_id) if isinstance(doc_id, int) else self.highest_doc_id,
-        )
-
-        if store_collection_with_index:
-            import base64
-            import io
-
-            # Resize image while maintaining aspect ratio
-            if self.max_image_width and self.max_image_height:
-                img_width, img_height = image.size
-                aspect_ratio = img_width / img_height
-                if img_width > self.max_image_width:
-                    new_width = self.max_image_width
-                    new_height = int(new_width / aspect_ratio)
-                else:
-                    new_width = img_width
-                    new_height = img_height
-                if new_height > self.max_image_height:
-                    new_height = self.max_image_height
-                    new_width = int(new_height * aspect_ratio)
-                if self.verbose > 2:
-                    print(
-                        f"Resizing image to {new_width}x{new_height}",
-                        f"(aspect ratio {aspect_ratio:.2f}, original size {img_width}x{img_height},"
-                        f"compression {new_width/img_width * new_height/img_height:.2f})",
-                    )
-                image = image.resize((new_width, new_height), Image.LANCZOS)
+    def _post_process_image(self, image: Image.Image) -> str:
+        # Resize image while maintaining aspect ratio
+        if self.max_image_width and self.max_image_height:
+            img_width, img_height = image.size
+            aspect_ratio = img_width / img_height
+            if img_width > self.max_image_width:
+                new_width = self.max_image_width
+                new_height = int(new_width / aspect_ratio)
+            else:
+                new_width = img_width
+                new_height = img_height
+            if new_height > self.max_image_height:
+                new_height = self.max_image_height
+                new_width = int(new_height * aspect_ratio)
+            if self.verbose > 2:
+                print(
+                    f"Resizing image to {new_width}x{new_height}",
+                    f"(aspect ratio {aspect_ratio:.2f}, original size {img_width}x{img_height},"
+                    f"compression {new_width / img_width * new_height / img_height:.2f})",
+                )
+            image = image.resize((new_width, new_height), Image.LANCZOS)
 
             buffered = io.BytesIO()
             image.save(buffered, format="PNG")
