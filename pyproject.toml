@@ -3,14 +3,14 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["byaldi*"]
+include = ["foretrieval*"]
 
 [project]
-name = "Byaldi"
-version = "0.0.7"
+name = "FORetrieval"
+version = "0.1"
 description = "Use late-interaction multi-modal models such as ColPali in just a few lines of code."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 license = { file = "LICENSE" }
 keywords = [
     "reranking",
@@ -21,18 +21,11 @@ keywords = [
     "colbert",
     "multi-modal",
 ]
-authors = [{ name = "Ben Clavié", email = "bc@answer.ai" }]
-maintainers = [
-    { name = "Ben Clavié", email = "bc@answer.ai" },
-    { name = "Tony Wu", email = "tony.wu@illuin.tech" },
-]
+authors = [{ name = "The FOR team", email = "for@irt-saintexupery.com" }]
 
 dependencies = [
     "colpali-engine>=0.3.4,<0.4.0",
     "ml-dtypes",
-    "mteb==1.6.35",
-    "ninja",
-    "pdf2image",
     "srsly",
     "torch",
     "transformers>=4.42.0",
@@ -42,9 +35,11 @@ dependencies = [
 dev = ["pytest>=7.4.0", "ruff>=0.1.9"]
 server = ["uvicorn", "fastapi"]
 langchain = ["langchain-core"]
+pdf2image = ["pdf2image"]
+
 
 [project.urls]
-"Homepage" = "https://github.com/answerdotai/byaldi"
+"Homepage" = "https://github.com/FOR-sight-ai/FORetrieval"
 
 [tool.pytest.ini_options]
 filterwarnings = ["ignore::Warning"]
@@ -83,7 +78,7 @@ exclude = [
 line-length = 88
 output-format = "grouped"
 
-target-version = "py39"
+target-version = "py312"
 
 [tool.ruff.lint]
 select = [

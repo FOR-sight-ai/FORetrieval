@@ -3,20 +3,19 @@ from typing import Any, Dict, List, Optional, Union
 
 from PIL import Image
 
-from byaldi.colpali import ColPaliModel
-
-from byaldi.objects import Result
+from .colpali import ColPaliModel
+from .objects import Result
 
 # Optional langchain integration
 try:
-    from byaldi.integrations import ByaldiLangChainRetriever
+    from .integrations import FORetrievalLangChain
 except ImportError:
     pass
 
 
-class RAGMultiModalModel:
+class MultiModalRetrieverModel:
     """
-    Wrapper class for a pretrained RAG multi-modal model, and all the associated utilities.
+    Wrapper class for a pretrained multi-modal model, and all the associated utilities.
     Allows you to load a pretrained model from disk or from the hub, build or query an index.
 
     ## Usage
@@ -24,9 +23,9 @@ class RAGMultiModalModel:
     Load a pre-trained checkpoint:
 
     ```python
-    from byaldi import RAGMultiModalModel
+    from foretrieval import MultiModalRetriever
 
-    RAG = RAGMultiModalModel.from_pretrained("vidore/colpali-v1.2")
+    RAG = MultiModalRetriever.from_pretrained("vidore/colpali-v1.2")
     ```
 
     Both methods will load a fully initialised instance of ColPali, which you can use to build and query indexes.
@@ -36,13 +35,13 @@ class RAGMultiModalModel:
     ```
     """
 
-    model: Optional[ColPaliModel] = None
+    model: ColPaliModel
 
     @classmethod
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: Union[str, Path],
-        index_root: str = ".byaldi",
+        index_root: str = ".rag_index",
         device: str = "cuda",
         verbose: int = 1,
     ):
@@ -68,7 +67,7 @@ class RAGMultiModalModel:
     def from_index(
         cls,
         index_path: Union[str, Path],
-        index_root: str = ".byaldi",
+        index_root: str = ".rag_index",
         device: str = "cuda",
         verbose: int = 1,
     ):
@@ -157,11 +156,11 @@ class RAGMultiModalModel:
 
     def search(
         self,
-        query: Union[str, List[str]],
+        query: str,
         k: int = 10,
-        filter_metadata: Optional[Dict[str,str]] = None,
+        filter_metadata: Optional[Dict[str, str]] = None,
         return_base64_results: Optional[bool] = None,
-    ) -> Union[List[Result], List[List[Result]]]:
+    ) -> List[Result]:
         """Query an index.
 
         Parameters:
@@ -174,8 +173,12 @@ class RAGMultiModalModel:
         """
         return self.model.search(query, k, filter_metadata, return_base64_results)
 
+    def fetch(self, result: Result) -> Result:
+        """Fetch a result from the index."""
+        return self.model.fetch_result_img(result)
+
     def get_doc_ids_to_file_names(self):
         return self.model.get_doc_ids_to_file_names()
 
     def as_langchain_retriever(self, **kwargs: Any):
-        return ByaldiLangChainRetriever(model=self, kwargs=kwargs)
+        return FORetrievalLangChain(model=self, kwargs=kwargs)
