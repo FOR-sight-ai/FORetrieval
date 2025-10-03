@@ -5,6 +5,7 @@ from PIL import Image
 
 from .colpali import ColPaliModel
 from .objects import Result
+from .models_metadata import MetadataFilter
 
 # Optional langchain integration
 try:
@@ -158,7 +159,7 @@ class MultiModalRetrieverModel:
         self,
         query: str,
         k: int = 10,
-        filter_metadata: Optional[Dict[str, str]] = None,
+        filter_metadata: Optional[Union[Dict[str, Any], MetadataFilter]] = None,
         return_base64_results: Optional[bool] = None,
     ) -> List[Result]:
         """Query an index.

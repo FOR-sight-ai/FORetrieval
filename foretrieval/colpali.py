@@ -5,7 +5,8 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Union, cast
+from typing import Dict, List, Optional, Union, cast, Any
+from datetime import datetime
 
 import srsly
 import torch
@@ -21,6 +22,8 @@ from pdf2image import convert_from_path
 from PIL import Image
 from tqdm import tqdm
 
+from .models_metadata import DocMetadata, MetadataFilter
+from .metadata import ai_metadata_provider_factory
 from .file_to_pdf import _convert_to_pdf
 from .objects import Result
 
@@ -520,7 +523,7 @@ class ColPaliModel:
         doc_ids: Optional[List[int]] = None,
         store_collection_with_index: bool = False,
         overwrite: bool = False,
-        metadata: Optional[List[Dict[str, Union[str, int]]]] = None,
+        metadata: Optional[Union[List[DocMetadata], Dict[int, DocMetadata]]] = None,
         max_image_width: Optional[int] = None,
         max_image_height: Optional[int] = None,
         batch_size: int = 1,
@@ -579,13 +582,20 @@ class ColPaliModel:
                 enumerate(items), total=len(items), desc="Indexing files"
             ):
                 doc_id = doc_ids[i] if doc_ids else self.highest_doc_id + 1
-                doc_metadata = metadata[doc_id] if metadata else None
+                if metadata is None:
+                    doc_md = None
+                elif isinstance(metadata, list):
+                    doc_md = metadata[i]  # liste alignée sur items
+                elif isinstance(metadata, dict):
+                    doc_md = metadata.get(doc_id)
+                else:
+                    doc_md = Noneoc_metadata = metadata[doc_id] if metadata else None
                 # try:
                 self.add_to_index(
                     item,
                     store_collection_with_index,
                     doc_id=doc_id,
-                    metadata=doc_metadata,
+                    metadata=doc_md,
                     batch_size=batch_size,
                 )
                 # self.doc_ids_to_file_names[doc_id] = str(item)
@@ -617,7 +627,7 @@ class ColPaliModel:
         input_item: Union[str, Path, Image.Image, List[Union[str, Path, Image.Image]]],
         store_collection_with_index: bool,
         doc_id: Optional[Union[int, List[int]]] = None,
-        metadata: Optional[List[Dict[str, Union[str, int]]]] = None,
+        metadata: Optional[Union[List[DocMetadata], DocMetadata]] = None,
         batch_size: int = 1,
     ) -> Dict[int, str]:
         if self.index_name is None:
@@ -893,8 +903,11 @@ class ColPaliModel:
         )
 
         # Add metadata
-        if metadata:
-            self.doc_id_to_metadata[doc_id] = metadata
+        if isinstance(metadata, DocMetadata):
+            self.doc_id_to_metadata[int(doc_id)] = metadata.as_jsonable()
+        elif isinstance(metadata, dict):
+            # compat: si certains appelants envoient encore des dicts
+            self.doc_id_to_metadata[int(doc_id)] = DocMetadata(**metadata).as_jsonable()
 
         if self.verbose > 0:
             print(f"Added {len(images)} pages of document {doc_id} to index.")
@@ -902,26 +915,107 @@ class ColPaliModel:
     def remove_from_index(self):
         raise NotImplementedError("This method is not implemented yet.")
 
-    def filter_embeddings(self, filter_metadata: Dict[str, str]):
+    def _parse_iso(s: str) -> Optional[datetime]:
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
+    def _any_in(a: List[str], b: List[str]) -> bool:
+        sa = {x.strip().lower() for x in a}
+        sb = {x.strip().lower() for x in b}
+        return len(sa & sb) > 0
+
+    def _value_match(meta: Dict[str, Any], f: MetadataFilter) -> bool:
+        checks = []
+
+        # language
+        if f.language is not None:
+            mv = (meta.get("language") or "").strip().lower()
+            if isinstance(f.language, list):
+                checks.append(mv in [x.strip().lower() for x in f.language])
+            else:
+                checks.append(mv == f.language.strip().lower())
+
+        # ext
+        if f.ext is not None:
+            mv = (meta.get("ext") or "").strip().lower()
+            candidates = f.ext if isinstance(f.ext, list) else [f.ext]
+            checks.append(mv in candidates)
+
+        # document_type
+        if f.document_type is not None:
+            mv = (meta.get("document_type") or "").strip().lower()
+            cands = f.document_type if isinstance(f.document_type, list) else [f.document_type]
+            checks.append(mv in [x.strip().lower() for x in cands])
+
+        # tags (contains / intersection)
+        if f.tags is not None:
+            mv = [str(t).strip().lower() for t in (meta.get("tags") or [])]
+            cands = f.tags if isinstance(f.tags, list) else [f.tags]
+            checks.append(_any_in(mv, [str(x).strip().lower() for x in cands]))
+
+        # mtime (opérateurs)
+        if f.mtime is not None:
+            m = meta.get("mtime")
+            mdt = _parse_iso(m) if isinstance(m, str) else None
+            if mdt is None:
+                checks.append(False)
+            else:
+                ok = True
+                for op, rhs in f.mtime.items():
+                    rdt = _parse_iso(rhs)
+                    if rdt is None:
+                        ok = False
+                        break
+                    if op == ">=" and not (mdt >= rdt): ok = False
+                    if op == "<=" and not (mdt <= rdt): ok = False
+                    if op == ">"  and not (mdt >  rdt): ok = False
+                    if op == "<"  and not (mdt <  rdt): ok = False
+                    if op == "==" and not (mdt == rdt): ok = False
+                    if not ok: break
+                checks.append(ok)
+
+        # autres clés libres (MetadataFilter.extra='allow')
+        for k, v in f.__dict__.items():
+            if k in {"language","ext","tags","document_type","mtime","logic"}:
+                continue
+            if v is None:
+                continue
+            mv = meta.get(k)
+            if isinstance(v, list):
+                checks.append(str(mv).strip().lower() in [str(x).strip().lower() for x in v])
+            else:
+                checks.append(str(mv).strip().lower() == str(v).strip().lower())
+
+        if not checks:
+            return True  # pas de filtre = passe
+
+        return all(checks) if f.logic.upper() == "AND" else any(checks)
+
+
+    def filter_embeddings(self, filter_metadata: Union[Dict[str, Any], MetadataFilter]):
+        # support dict → modèle Pydantic
+        f = filter_metadata if isinstance(filter_metadata, MetadataFilter) else MetadataFilter(**filter_metadata)
+
         req_doc_ids = []
-        for idx, metadata_dict in self.doc_id_to_metadata.items():
-            for metadata_key, metadata_value in metadata_dict.items():
-                if metadata_key in filter_metadata:
-                    if filter_metadata[metadata_key] == metadata_value:
-                        req_doc_ids.append(idx)
+        for did, md in self.doc_id_to_metadata.items():
+            # md est stocké en dict JSONable -> parse léger
+            if _value_match(md, f):
+                req_doc_ids.append(int(did))
+
+        req_doc_ids = list(set(req_doc_ids))
 
         req_embedding_ids = [
-            eid
-            for eid, doc in self.embed_id_to_doc_id.items()
-            if doc["doc_id"] in req_doc_ids
+            eid for eid, doc in self.embed_id_to_doc_id.items()
+            if int(doc["doc_id"]) in req_doc_ids
         ]
         req_embeddings = [
-            ie
-            for idx, ie in enumerate(self.indexed_embeddings)
+            ie for idx, ie in enumerate(self.indexed_embeddings)
             if idx in req_embedding_ids
         ]
-
         return req_embeddings, req_embedding_ids
+
 
     def search(
         self,
