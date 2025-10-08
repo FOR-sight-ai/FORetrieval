@@ -39,7 +39,7 @@ pdf2image = ["pdf2image"]
 
 
 [project.urls]
-"Homepage" = "https://github.com/answerdotai/byaldi"
+"Homepage" = "https://github.com/FOR-sight-ai/FORetrieval"
 
 [tool.pytest.ini_options]
 filterwarnings = ["ignore::Warning"]
