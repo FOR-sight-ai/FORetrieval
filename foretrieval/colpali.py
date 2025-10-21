@@ -5,12 +5,8 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-<<<<<<< HEAD
-from typing import Dict, List, Optional, Union, cast
-=======
 from typing import Dict, List, Optional, Union, cast, Any
 from datetime import datetime
->>>>>>> origin/import_various_document
 
 import srsly
 import torch
@@ -26,12 +22,9 @@ from pdf2image import convert_from_path
 from PIL import Image
 from tqdm import tqdm
 
-<<<<<<< HEAD
-=======
 from .models_metadata import DocMetadata, MetadataFilter
 from .metadata import ai_metadata_provider_factory
 from .file_to_pdf import _convert_to_pdf
->>>>>>> origin/import_various_document
 from .objects import Result
 
 VERSION = "0.0.1"
@@ -48,11 +41,7 @@ class ColPaliModel:
         index_name: Optional[str] = None,
         verbose: int = 1,
         load_from_index: bool = False,
-<<<<<<< HEAD
-        index_root: str = ".byaldi",
-=======
         index_root: str = ".foretrieval",
->>>>>>> origin/import_various_document
         device: Optional[Union[str, torch.device]] = None,
         **kwargs,
     ):
@@ -94,14 +83,28 @@ class ColPaliModel:
         self.doc_ids_to_file_names = {}
         self.doc_ids = set()
 
-        self.SOURCE_EXTS = {".doc", ".docx", ".rtf", ".odt",
-               ".ppt", ".pptx", ".odp",
-               ".xls", ".xlsx", ".ods",
-               ".txt", ".md", ".csv", ".json", ".yaml", ".yml",
-               ".epub", ".html"}
+        self.SOURCE_EXTS = {
+            ".doc",
+            ".docx",
+            ".rtf",
+            ".odt",
+            ".ppt",
+            ".pptx",
+            ".odp",
+            ".xls",
+            ".xlsx",
+            ".ods",
+            ".txt",
+            ".md",
+            ".csv",
+            ".json",
+            ".yaml",
+            ".yml",
+            ".epub",
+            ".html",
+        }
 
         self.IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif"}
-
 
         if "colpali" in pretrained_model_name_or_path.lower():
             self.model = ColPali.from_pretrained(
@@ -387,22 +390,22 @@ class ColPaliModel:
         reindex_modified: bool = False,
     ) -> Dict[int, str]:
         """
-        Ajoute uniquement les NOUVEAUX fichiers d'un dossier à l'index courant.
-        - Ignore les PDF miroirs s'il existe un fichier source du même stem.
-        - Évite les doublons en regardant si le fichier (ou son PDF jumeau) est déjà indexé.
-        - Si reindex_modified=True, réindexe aussi les fichiers dont la date de modif a changé
-        (comparée à la cible canonique stockée). Dans ce cas, on supprime l'ancien doc_id
-        et on réindexe avec un nouveau doc_id.
+        Adds only NEW files from a folder to the current index.
+        - Ignores mirror PDFs if a source file with the same stem exists.
+        - Avoids duplicates by checking if the file (or its sibling PDF) is already indexed.
+        - If reindex_modified=True, also reindexes files whose modification date has changed
+        (compared to the stored canonical target). In this case, the old doc_id is removed
+        and the file is reindexed with a new doc_id.
 
         metadata_provider: callable(Path) -> Optional[Dict[str, Union[str,int]]]
         """
         folder = Path(folder)
         assert folder.is_dir(), f"{folder} n'est pas un dossier existant."
 
-        # set de chemins déjà connus
+        # set of already known paths
         known = self._already_indexed_paths()
 
-        # map inverse pour retrouver un doc_id à partir d'un path canonique
+        # inverse map to find a doc_id from a canonical path
         inverse_map: Dict[str, int] = {}
         for did, p in self.doc_ids_to_file_names.items():
             if p and p != "In-memory Image":
@@ -416,27 +419,27 @@ class ColPaliModel:
 
         for item in sorted(folder.iterdir()):
             if item.is_dir():
-                # (optionnel) descente récursive si tu veux
+                # (optional) recursive descent if you want
                 continue
 
             ext = item.suffix.lower()
 
-            # 1) ignorer les PDF miroirs (si un source existe)
+            # 1) ignore mirror PDFs (if a source exists)
             if ext == ".pdf" and self._is_mirror_pdf(item):
                 if self.verbose > 1:
-                    print(f"[skip] Mirror PDF ignoré: {item}")
+                    print(f"[skip] Mirror PDF ignored: {item}")
                 continue
 
-            # 2) éviter les doublons: path lui-même OU son pdf jumeau déjà connus ?
+            # 2) avoid duplicates: path itself OR its sibling PDF already known?
             cand_keys = self._candidate_keys(item)
             if any(k in known for k in cand_keys) and not reindex_modified:
                 if self.verbose > 1:
-                    print(f"[skip] Déjà indexé: {item}")
+                    print(f"[skip] Already indexed: {item}")
                 continue
 
-            # 3) gestion reindex_modified
+            # 3) reindex_modified handling
             if reindex_modified:
-                # si on trouve une clé connue, vérifier mtime
+                # if we find a known key, check mtime
                 target_key = None
                 for k in cand_keys:
                     if k in known:
@@ -450,24 +453,30 @@ class ColPaliModel:
                     except Exception:
                         src_stat, tgt_stat = None, None
 
-                    # réindexer seulement si le src est plus récent
-                    if src_stat is not None and tgt_stat is not None and src_stat <= tgt_stat:
+                    # reindex only if the src is newer
+                    if (
+                        src_stat is not None
+                        and tgt_stat is not None
+                        and src_stat <= tgt_stat
+                    ):
                         if self.verbose > 1:
-                            print(f"[skip] Inchangé (mtime): {item}")
+                            print(f"[skip] Unchanged (mtime): {item}")
                         continue
 
-                    # supprimer l'ancien doc_id et (simplement) le remplacer par un nouveau
+                    # remove the old doc_id and (simply) replace it with a new one
                     old_doc_id = inverse_map.get(target_key)
                     if old_doc_id is not None:
                         if self.verbose > 0:
-                            print(f"[update] Réindexation (modifié): {item} (doc_id {old_doc_id})")
-                        # NB: pas d'API de suppression granulaire implémentée ;
-                        # le plus simple est d'ajouter un nouveau doc_id et, si besoin,
-                        # marquer l'ancien comme obsolète via un champ de metadata ou
-                        # maintenir une liste 'tombstones'. Ici on ajoute juste un nouveau.
+                            print(
+                                f"[update] Reindexing (modified): {item} (doc_id {old_doc_id})"
+                            )
+                        # NB: no granular deletion API implemented;
+                        # the simplest is to add a new doc_id and, if needed,
+                        # mark the old one as obsolete via a metadata field or
+                        # maintain a 'tombstones' list. Here we just add a new one.
                         updated += 1
 
-            # 4) indexer ce fichier (nouveau ou mis à jour)
+            # 4) index this file (new or updated)
             doc_id = self.highest_doc_id + 1
             md = metadata_provider(item) if metadata_provider else None
             stored_path = self._process_and_add_to_index(
@@ -486,17 +495,16 @@ class ColPaliModel:
             self.highest_doc_id = max(self.highest_doc_id, doc_id)
             added += 1
 
-        # export pour persister les mappings
+        # export to persist mappings
         self._export_index()
 
         if self.verbose > 0:
-            print(f"[incr] ajoutés: {added} | réindexés: {updated}")
+            print(f"[incr] added: {added} | reindexed: {updated}")
 
         return self.doc_ids_to_file_names
 
-
     def _already_indexed_paths(self) -> set:
-        """Toutes les cibles 'canoniques' déjà indexées (paths normalisés)."""
+        """All already indexed 'canonical' targets (normalized paths)."""
         vals = set()
         for p in self.doc_ids_to_file_names.values():
             if not p or p == "In-memory Image":
@@ -509,9 +517,9 @@ class ColPaliModel:
 
     def _candidate_keys(self, path: Path) -> List[str]:
         """
-        Clés possibles à vérifier dans l'index pour éviter les doublons :
-        - le path lui-même (résolu)
-        - son PDF jumeau s'il existe
+        Possible keys to check in the index to avoid duplicates:
+        - the path itself (resolved)
+        - its sibling PDF if it exists
         """
         keys = []
         try:
@@ -534,11 +542,7 @@ class ColPaliModel:
         doc_ids: Optional[List[int]] = None,
         store_collection_with_index: bool = False,
         overwrite: bool = False,
-<<<<<<< HEAD
-        metadata: Optional[List[Dict[str, Union[str, int]]]] = None,
-=======
         metadata: Optional[Union[List[DocMetadata], Dict[int, DocMetadata]]] = None,
->>>>>>> origin/import_various_document
         max_image_width: Optional[int] = None,
         max_image_height: Optional[int] = None,
         batch_size: int = 1,
@@ -597,34 +601,23 @@ class ColPaliModel:
                 enumerate(items), total=len(items), desc="Indexing files"
             ):
                 doc_id = doc_ids[i] if doc_ids else self.highest_doc_id + 1
-<<<<<<< HEAD
-                doc_metadata = metadata[doc_id] if metadata else None
-=======
                 if metadata is None:
                     doc_md = None
                 elif isinstance(metadata, list):
-                    doc_md = metadata[i]  # liste alignée sur items
+                    doc_md = metadata[i]  # align list on items
                 elif isinstance(metadata, dict):
                     doc_md = metadata.get(doc_id)
                 else:
                     doc_md = Noneoc_metadata = metadata[doc_id] if metadata else None
->>>>>>> origin/import_various_document
                 # try:
                 self.add_to_index(
                     item,
                     store_collection_with_index,
                     doc_id=doc_id,
-<<<<<<< HEAD
-                    metadata=doc_metadata,
-                    batch_size=batch_size,
-                )
-                self.doc_ids_to_file_names[doc_id] = str(item)
-=======
                     metadata=doc_md,
                     batch_size=batch_size,
                 )
                 # self.doc_ids_to_file_names[doc_id] = str(item)
->>>>>>> origin/import_various_document
                 # except:
                 #     print(f"...skipping corrupted or malformed file: {item}\n")
         else:
@@ -640,11 +633,7 @@ class ColPaliModel:
                 doc_id=doc_id,
                 metadata=doc_metadata,
             )
-<<<<<<< HEAD
-            self.doc_ids_to_file_names[doc_id] = str(input_path)
-=======
             # self.doc_ids_to_file_names[doc_id] = str(input_path)
->>>>>>> origin/import_various_document
 
         self._export_index()
         if self.highest_doc_id == -1:
@@ -657,11 +646,7 @@ class ColPaliModel:
         input_item: Union[str, Path, Image.Image, List[Union[str, Path, Image.Image]]],
         store_collection_with_index: bool,
         doc_id: Optional[Union[int, List[int]]] = None,
-<<<<<<< HEAD
-        metadata: Optional[List[Dict[str, Union[str, int]]]] = None,
-=======
         metadata: Optional[Union[List[DocMetadata], DocMetadata]] = None,
->>>>>>> origin/import_various_document
         batch_size: int = 1,
     ) -> Dict[int, str]:
         if self.index_name is None:
@@ -713,27 +698,19 @@ class ColPaliModel:
                         batch_size,
                     )
                 else:
-<<<<<<< HEAD
-                    self._process_and_add_to_index(
-=======
                     stored_path = self._process_and_add_to_index(
->>>>>>> origin/import_various_document
                         item_path,
                         store_collection_with_index,
                         current_doc_id,
                         current_metadata,
                         batch_size,
                     )
-<<<<<<< HEAD
-                self.doc_ids_to_file_names[current_doc_id] = str(item_path)
-=======
                     # stocke le chemin réellement exploitable plus tard
                     if stored_path is None:
                         self.doc_ids_to_file_names[current_doc_id] = "In-memory Image"
                     else:
                         self.doc_ids_to_file_names[current_doc_id] = str(stored_path)
 
->>>>>>> origin/import_various_document
             elif isinstance(item, Image.Image):
                 self._process_and_add_to_index(
                     item, store_collection_with_index, current_doc_id, current_metadata
@@ -756,12 +733,6 @@ class ColPaliModel:
         for i, item in enumerate(directory.iterdir()):
             print(f"Indexing file: {item}")
             current_doc_id = base_doc_id + i
-<<<<<<< HEAD
-            self._process_and_add_to_index(
-                item, store_collection_with_index, current_doc_id, metadata, batch_size
-            )
-            self.doc_ids_to_file_names[current_doc_id] = str(item)
-=======
             stored_path = self._process_and_add_to_index(
                 item, store_collection_with_index, current_doc_id, metadata, batch_size
             )
@@ -769,7 +740,6 @@ class ColPaliModel:
                 self.doc_ids_to_file_names[current_doc_id] = "In-memory Image"
             else:
                 self.doc_ids_to_file_names[current_doc_id] = str(stored_path)
->>>>>>> origin/import_various_document
 
     def _process_and_add_to_index(
         self,
@@ -778,19 +748,10 @@ class ColPaliModel:
         doc_id: Union[str, int],
         metadata: Optional[Dict[str, Union[str, int]]] = None,
         batch_size: int = 1,
-<<<<<<< HEAD
-    ):
-        """Process and add an image or PDF to the index, using batch processing."""
-        if isinstance(item, Path):
-            if item.suffix.lower() == ".pdf":
-                with tempfile.TemporaryDirectory() as path:
-                    images = convert_from_path(
-                        item,
-=======
     ) -> Optional[Path]:
         """
-        Traite et indexe une image ou tout fichier (converti en PDF si besoin).
-        Retourne le chemin 'canonique' (PDF ou image) utilisé, ou None pour image en mémoire.
+        Process and index an image or any file (converted to PDF if needed).
+        Returns the 'canonical' path (PDF or image) used, or None for in-memory images.
         """
         if isinstance(item, Path):
             ext = item.suffix.lower()
@@ -800,20 +761,12 @@ class ColPaliModel:
                 with tempfile.TemporaryDirectory() as path:
                     images = convert_from_path(
                         pdf_file,
->>>>>>> origin/import_various_document
                         thread_count=os.cpu_count() - 1,
                         output_folder=path,
                         paths_only=True,
                     )
-<<<<<<< HEAD
-                    # Process images in batches
-                    for i in range(0, len(images), batch_size):
-                        batch_images = []
-                        batch_page_ids = []
-=======
                     for i in range(0, len(images), batch_size):
                         batch_images, batch_page_ids = [], []
->>>>>>> origin/import_various_document
                         for j in range(i, min(i + batch_size, len(images))):
                             image_path = images[j]
                             image = Image.open(image_path)
@@ -826,32 +779,22 @@ class ColPaliModel:
                             page_ids=batch_page_ids,
                             metadata=metadata,
                         )
-<<<<<<< HEAD
-            elif item.suffix.lower() in [".jpg", ".jpeg", ".png", ".bmp"]:
-                image = Image.open(item)
-                self._add_to_index(
-                    image, store_collection_with_index, doc_id, metadata=metadata
-                )
-        elif isinstance(item, Image.Image):
-            self._add_to_index(
-                item, store_collection_with_index, doc_id, metadata=metadata
-            )
-=======
                 return pdf_file
 
             elif ext in [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif"]:
                 image = Image.open(item)
-                self._add_to_index(image, store_collection_with_index, doc_id, metadata=metadata)
-                return item.resolve()  # <--- chemin image disque
+                self._add_to_index(
+                    image, store_collection_with_index, doc_id, metadata=metadata
+                )
+                return item.resolve()  # <--- disk image path
 
-            
             else:
-                # 1) si un PDF jumeau existe déjà et semble valide → on l’utilise
+                # 1) if a valid twin PDF already exists → use it
                 existing_pdf = self._find_existing_pdf(item)
                 if existing_pdf is not None:
                     pdf_file = existing_pdf
                 else:
-                    # 2) sinon on convertit
+                    # 2) otherwise convert it
                     pdf_file = _convert_to_pdf(item)
                     if pdf_file is None:
                         return None  # skip
@@ -880,9 +823,10 @@ class ColPaliModel:
                 return Path(pdf_file).resolve()
 
         elif isinstance(item, Image.Image):
-            self._add_to_index(item, store_collection_with_index, doc_id, metadata=metadata)
+            self._add_to_index(
+                item, store_collection_with_index, doc_id, metadata=metadata
+            )
             return None  # in-memory
->>>>>>> origin/import_various_document
         else:
             raise ValueError(f"Unsupported input type: {type(item)}")
 
@@ -981,16 +925,11 @@ class ColPaliModel:
         )
 
         # Add metadata
-<<<<<<< HEAD
-        if metadata:
-            self.doc_id_to_metadata[doc_id] = metadata
-=======
         if isinstance(metadata, DocMetadata):
             self.doc_id_to_metadata[int(doc_id)] = metadata.as_jsonable()
         elif isinstance(metadata, dict):
             # compat: si certains appelants envoient encore des dicts
             self.doc_id_to_metadata[int(doc_id)] = DocMetadata(**metadata).as_jsonable()
->>>>>>> origin/import_various_document
 
         if self.verbose > 0:
             print(f"Added {len(images)} pages of document {doc_id} to index.")
@@ -998,29 +937,6 @@ class ColPaliModel:
     def remove_from_index(self):
         raise NotImplementedError("This method is not implemented yet.")
 
-<<<<<<< HEAD
-    def filter_embeddings(self, filter_metadata: Dict[str, str]):
-        req_doc_ids = []
-        for idx, metadata_dict in self.doc_id_to_metadata.items():
-            for metadata_key, metadata_value in metadata_dict.items():
-                if metadata_key in filter_metadata:
-                    if filter_metadata[metadata_key] == metadata_value:
-                        req_doc_ids.append(idx)
-
-        req_embedding_ids = [
-            eid
-            for eid, doc in self.embed_id_to_doc_id.items()
-            if doc["doc_id"] in req_doc_ids
-        ]
-        req_embeddings = [
-            ie
-            for idx, ie in enumerate(self.indexed_embeddings)
-            if idx in req_embedding_ids
-        ]
-
-        return req_embeddings, req_embedding_ids
-
-=======
     def _parse_iso(s: str) -> Optional[datetime]:
         try:
             return datetime.fromisoformat(s.replace("Z", "+00:00"))
@@ -1052,7 +968,11 @@ class ColPaliModel:
         # document_type
         if f.document_type is not None:
             mv = (meta.get("document_type") or "").strip().lower()
-            cands = f.document_type if isinstance(f.document_type, list) else [f.document_type]
+            cands = (
+                f.document_type
+                if isinstance(f.document_type, list)
+                else [f.document_type]
+            )
             checks.append(mv in [x.strip().lower() for x in cands])
 
         # tags (contains / intersection)
@@ -1074,23 +994,31 @@ class ColPaliModel:
                     if rdt is None:
                         ok = False
                         break
-                    if op == ">=" and not (mdt >= rdt): ok = False
-                    if op == "<=" and not (mdt <= rdt): ok = False
-                    if op == ">"  and not (mdt >  rdt): ok = False
-                    if op == "<"  and not (mdt <  rdt): ok = False
-                    if op == "==" and not (mdt == rdt): ok = False
-                    if not ok: break
+                    if op == ">=" and not (mdt >= rdt):
+                        ok = False
+                    if op == "<=" and not (mdt <= rdt):
+                        ok = False
+                    if op == ">" and not (mdt > rdt):
+                        ok = False
+                    if op == "<" and not (mdt < rdt):
+                        ok = False
+                    if op == "==" and not (mdt == rdt):
+                        ok = False
+                    if not ok:
+                        break
                 checks.append(ok)
 
         # autres clés libres (MetadataFilter.extra='allow')
         for k, v in f.__dict__.items():
-            if k in {"language","ext","tags","document_type","mtime","logic"}:
+            if k in {"language", "ext", "tags", "document_type", "mtime", "logic"}:
                 continue
             if v is None:
                 continue
             mv = meta.get(k)
             if isinstance(v, list):
-                checks.append(str(mv).strip().lower() in [str(x).strip().lower() for x in v])
+                checks.append(
+                    str(mv).strip().lower() in [str(x).strip().lower() for x in v]
+                )
             else:
                 checks.append(str(mv).strip().lower() == str(v).strip().lower())
 
@@ -1099,10 +1027,13 @@ class ColPaliModel:
 
         return all(checks) if f.logic.upper() == "AND" else any(checks)
 
-
     def filter_embeddings(self, filter_metadata: Union[Dict[str, Any], MetadataFilter]):
         # support dict → modèle Pydantic
-        f = filter_metadata if isinstance(filter_metadata, MetadataFilter) else MetadataFilter(**filter_metadata)
+        f = (
+            filter_metadata
+            if isinstance(filter_metadata, MetadataFilter)
+            else MetadataFilter(**filter_metadata)
+        )
 
         req_doc_ids = []
         for did, md in self.doc_id_to_metadata.items():
@@ -1113,17 +1044,17 @@ class ColPaliModel:
         req_doc_ids = list(set(req_doc_ids))
 
         req_embedding_ids = [
-            eid for eid, doc in self.embed_id_to_doc_id.items()
+            eid
+            for eid, doc in self.embed_id_to_doc_id.items()
             if int(doc["doc_id"]) in req_doc_ids
         ]
         req_embeddings = [
-            ie for idx, ie in enumerate(self.indexed_embeddings)
+            ie
+            for idx, ie in enumerate(self.indexed_embeddings)
             if idx in req_embedding_ids
         ]
         return req_embeddings, req_embedding_ids
 
-
->>>>>>> origin/import_various_document
     def search(
         self,
         query: str,
@@ -1158,30 +1089,16 @@ class ColPaliModel:
         else:
             req_embeddings = self.indexed_embeddings
             req_embedding_ids = list(range(len(self.indexed_embeddings)))
-<<<<<<< HEAD
-            # Compute scores
-            scores = (
-                self.processor.score(qs, req_embeddings, device=self.device)
-                .cpu()
-                .numpy()
-            )
-
-            # Get top k relevant pages
-            top_pages = scores.argsort(axis=1)[0][-k:][::-1].tolist()
-=======
 
         # Compute scores (toujours)
         scores = (
-            self.processor.score(qs, req_embeddings, device=self.device)
-            .cpu()
-            .numpy()
+            self.processor.score(qs, req_embeddings, device=self.device).cpu().numpy()
         )
 
         # Get top k relevant pages
         top_pages = scores.argsort(axis=1)[0][-k:][::-1].tolist()
->>>>>>> origin/import_various_document
 
-            # Create Result objects
+        # Create Result objects
         results = []
         for embed_id in top_pages:
             adjusted_embed_id = req_embedding_ids[embed_id]
@@ -1294,24 +1211,6 @@ class ColPaliModel:
     def get_doc_ids_to_file_names(self):
         return self.doc_ids_to_file_names
 
-<<<<<<< HEAD
-    def fetch_result_img(self, result: Result) -> Result:
-        """
-        Get the image of the result at a given page and put it in the result object.
-        Args:
-            result (Result): The result object.
-            page_id (int): The page id of the result.
-        Returns:
-            Result: The result object with the image of the result at the given page.
-        """
-        if not result.base64:
-            doc_id = result.doc_id
-            file_name = self.doc_ids_to_file_names[doc_id]
-            # get the image from the file using pdf2image
-            with tempfile.TemporaryDirectory() as path:
-                images = convert_from_path(
-                    file_name,
-=======
     def _looks_like_pdf(self, path: Path) -> bool:
         try:
             if not path.exists() or path.stat().st_size < 5:
@@ -1326,7 +1225,6 @@ class ColPaliModel:
         if cand.exists() and self._looks_like_pdf(cand):
             return cand.resolve()
         return None
-
 
     def fetch_result_img(self, result: Result) -> Result:
         if result.base64:
@@ -1361,27 +1259,19 @@ class ColPaliModel:
                         ext = ".pdf"
                     else:
                         if self.verbose > 0:
-                            print(f"[fetch_result_img] Impossible de convertir {path} en PDF.")
+                            print(
+                                f"[fetch_result_img] Impossible de convertir {path} en PDF."
+                            )
                         return result
 
             # PDF : on extrait la page demandée
             with tempfile.TemporaryDirectory() as tmpdir:
                 images = convert_from_path(
                     str(path),
->>>>>>> origin/import_various_document
                     thread_count=os.cpu_count() - 1,
                     first_page=result.page_num,
                     last_page=result.page_num,
                     paths_only=True,
-<<<<<<< HEAD
-                    output_folder=path,
-                )
-                image = Image.open(images[0])
-                img_str = self._post_process_image(image)
-
-            result.base64 = img_str
-        return result
-=======
                     output_folder=tmpdir,
                 )
                 image = Image.open(images[0])
@@ -1392,4 +1282,3 @@ class ColPaliModel:
             if self.verbose > 0:
                 print(f"[fetch_result_img] Erreur: {e}")
             return result
->>>>>>> origin/import_various_document
