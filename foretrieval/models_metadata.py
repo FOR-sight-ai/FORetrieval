@@ -1,7 +1,7 @@
-# models_metadata.py
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
+
 
 class DocMetadata(BaseModel):
     source_path: Optional[str] = None
@@ -20,18 +20,18 @@ class DocMetadata(BaseModel):
     short_description: Optional[str] = None
 
     # --- Normalisations utiles ---
-    @validator("ext", pre=True)
+    @field_validator("ext", mode="before")
     def _norm_ext(cls, v):
         if v is None:
             return v
         v = str(v).strip().lower()
         return v if v.startswith(".") else f".{v}"
 
-    @validator("language", "author", "title", pre=True)
+    @field_validator("language", "author", "title", mode="before")
     def _norm_str(cls, v):
         return v.strip() if isinstance(v, str) else v
 
-    @validator("tags", pre=True)
+    @field_validator("tags", mode="before")
     def _norm_tags(cls, v):
         if v is None:
             return []
@@ -39,7 +39,7 @@ class DocMetadata(BaseModel):
             v = [v]
         return [str(t).strip().lower() for t in v]
 
-    @validator("mtime", pre=True)
+    @field_validator("mtime", mode="before")
     def _parse_dt(cls, v):
         if v is None:
             return None
@@ -71,18 +71,19 @@ class MetadataFilter(BaseModel):
     class Config:
         extra = "allow"  # autorise d'autres clés metadata si besoin
 
-    @validator("ext", pre=True)
+    @field_validator("ext", mode="before")
     def _norm_filter_ext(cls, v):
-        def nx(s): 
+        def nx(s):
             s = s.strip().lower()
             return s if s.startswith(".") else f".{s}"
+
         if v is None:
             return v
         if isinstance(v, list):
             return [nx(x) for x in v]
         return nx(v)
 
-    @validator("tags", pre=True)
+    @field_validator("tags", mode="before")
     def _norm_filter_tags(cls, v):
         if v is None:
             return v
