@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union, Callable
 
 from PIL import Image
 
@@ -174,6 +174,22 @@ class MultiModalRetrieverModel:
             Union[List[Result], List[List[Result]]]: A list of Result objects or a list of lists of Result objects.
         """
         return self.model.search(query, k, filter_metadata, return_base64_results)
+
+    def update_index_from_folder(
+        self,
+        folder: Union[str, Path],
+        store_collection_with_index: bool = False,
+        metadata_provider: Optional[Callable] = None,
+        batch_size: int = 1,
+        reindex_modified: bool = False,
+    ) -> Dict[int, str]:
+        return self.model.update_index_from_folder(
+            folder,
+            store_collection_with_index,
+            metadata_provider,
+            batch_size,
+            reindex_modified,
+        )
 
     def fetch(self, result: Result) -> Result:
         """Fetch a result from the index."""
