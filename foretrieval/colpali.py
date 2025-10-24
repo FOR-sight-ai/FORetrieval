@@ -5,7 +5,7 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Union, cast, Any
+from typing import Dict, List, Optional, Union, cast, Any, Callable
 from datetime import datetime
 
 import srsly
@@ -23,7 +23,6 @@ from PIL import Image
 from tqdm import tqdm
 
 from .models_metadata import DocMetadata, MetadataFilter
-from .metadata import ai_metadata_provider_factory
 from .file_to_pdf import _convert_to_pdf
 from .objects import Result
 
@@ -385,7 +384,7 @@ class ColPaliModel:
         self,
         folder: Union[str, Path],
         store_collection_with_index: bool = False,
-        metadata_provider: Optional[callable] = None,
+        metadata_provider: Optional[Callable] = None,
         batch_size: int = 1,
         reindex_modified: bool = False,
     ) -> Dict[int, str]:
@@ -558,13 +557,15 @@ class ColPaliModel:
                 "Pass a new index_name to create a new index.",
                 "Exiting indexing without doing anything...",
             )
-            return None
         if index_name is None:
             raise ValueError("index_name must be specified to create a new index.")
 
         index_path = Path(os.path.join(Path(self.index_root), Path(index_name)))
         if index_path.exists():
-            if overwrite is False:
+            if not overwrite and (
+                (index_path.is_dir() and len(list(index_path.iterdir())) > 0)
+                or index_path.is_file()
+            ):
                 logger.warning(
                     f"An index named {index_name} already exists.",
                     "Use overwrite=True to delete the existing index and build a new one.",
@@ -572,7 +573,7 @@ class ColPaliModel:
                 )
                 return None
             else:
-                print(
+                logger.info(
                     f"overwrite is on. Deleting existing index {index_name} to build a new one."
                 )
                 shutil.rmtree(index_path)
@@ -608,8 +609,8 @@ class ColPaliModel:
                 elif isinstance(metadata, dict):
                     doc_md = metadata.get(doc_id)
                 else:
-                    doc_md = Noneoc_metadata = metadata[doc_id] if metadata else None
-                # try:
+                    doc_md = metadata[doc_id] if metadata else None
+
                 self.add_to_index(
                     item,
                     store_collection_with_index,
@@ -617,9 +618,6 @@ class ColPaliModel:
                     metadata=doc_md,
                     batch_size=batch_size,
                 )
-                # self.doc_ids_to_file_names[doc_id] = str(item)
-                # except:
-                #     print(f"...skipping corrupted or malformed file: {item}\n")
         else:
             if metadata is not None and len(metadata) != 1:
                 raise ValueError(
