@@ -6,7 +6,8 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Union, cast, Any, Callable
-from datetime import datetime
+
+from .utils import _value_match
 
 import srsly
 import torch
@@ -183,9 +184,9 @@ class ColPaliModel:
                 raise ValueError("No index name specified. Cannot load from index.")
 
             index_path = Path(os.path.join(Path(index_root), Path(self.index_name)))
-            index_config = srsly.read_gzip_json(
+            index_config: dict = srsly.read_gzip_json(
                 os.path.join(index_path, "index_config.json.gz")
-            )
+            )  # type: ignore
             self.full_document_collection = index_config.get(
                 "full_document_collection", False
             )
@@ -205,13 +206,9 @@ class ColPaliModel:
                     self.collection.update({int(k): v for k, v in loaded_data.items()})
 
                 if self.verbose > 0:
-                    print(
+                    logger.debug(
                         "You are using in-memory collection. This means every image is stored in memory."
-                    )
-                    print(
                         "You might want to rethink this if you have a large collection!"
-                    )
-                    print(
                         f"Loaded {len(self.collection)} images from {len(json_files)} JSON files."
                     )
 
@@ -224,7 +221,7 @@ class ColPaliModel:
             for file in embedding_files:
                 self.indexed_embeddings.extend(torch.load(file))
 
-            self.embed_id_to_doc_id = srsly.read_gzip_json(
+            self.embed_id_to_doc_id: Dict[int, Dict[str, int]] = srsly.read_gzip_json(
                 os.path.join(index_path, "embed_id_to_doc_id.json.gz")
             )
             # Restore keys to integers
@@ -239,7 +236,7 @@ class ColPaliModel:
             )
             try:
                 # We don't want this error out with indexes created prior to 0.0.2
-                self.doc_ids_to_file_names = srsly.read_gzip_json(
+                self.doc_ids_to_file_names: Dict[int, str] = srsly.read_gzip_json(
                     os.path.join(index_path, "doc_ids_to_file_names.json.gz")
                 )
                 self.doc_ids_to_file_names = {
@@ -290,9 +287,9 @@ class ColPaliModel:
         **kwargs,
     ):
         index_path = Path(os.path.join(Path(index_root), Path(index_path)))
-        index_config = srsly.read_gzip_json(
+        index_config: dict = srsly.read_gzip_json(
             os.path.join(index_path, "index_config.json.gz")
-        )
+        )  # type: ignore
 
         instance = cls(
             pretrained_model_name_or_path=index_config["model_name"],
@@ -376,7 +373,7 @@ class ColPaliModel:
         stem = path.with_suffix("")
         parent = path.parent
         for ext in self.SOURCE_EXTS:
-            if (os.path.join(parent, f"{stem.name}{ext}")).exists():
+            if Path(os.path.join(parent, f"{stem.name}{ext}")).exists():
                 return True
         return False
 
@@ -934,96 +931,6 @@ class ColPaliModel:
 
     def remove_from_index(self):
         raise NotImplementedError("This method is not implemented yet.")
-
-    def _parse_iso(s: str) -> Optional[datetime]:
-        try:
-            return datetime.fromisoformat(s.replace("Z", "+00:00"))
-        except Exception:
-            return None
-
-    def _any_in(a: List[str], b: List[str]) -> bool:
-        sa = {x.strip().lower() for x in a}
-        sb = {x.strip().lower() for x in b}
-        return len(sa & sb) > 0
-
-    def _value_match(meta: Dict[str, Any], f: MetadataFilter) -> bool:
-        checks = []
-
-        # language
-        if f.language is not None:
-            mv = (meta.get("language") or "").strip().lower()
-            if isinstance(f.language, list):
-                checks.append(mv in [x.strip().lower() for x in f.language])
-            else:
-                checks.append(mv == f.language.strip().lower())
-
-        # ext
-        if f.ext is not None:
-            mv = (meta.get("ext") or "").strip().lower()
-            candidates = f.ext if isinstance(f.ext, list) else [f.ext]
-            checks.append(mv in candidates)
-
-        # document_type
-        if f.document_type is not None:
-            mv = (meta.get("document_type") or "").strip().lower()
-            cands = (
-                f.document_type
-                if isinstance(f.document_type, list)
-                else [f.document_type]
-            )
-            checks.append(mv in [x.strip().lower() for x in cands])
-
-        # tags (contains / intersection)
-        if f.tags is not None:
-            mv = [str(t).strip().lower() for t in (meta.get("tags") or [])]
-            cands = f.tags if isinstance(f.tags, list) else [f.tags]
-            checks.append(_any_in(mv, [str(x).strip().lower() for x in cands]))
-
-        # mtime (opérateurs)
-        if f.mtime is not None:
-            m = meta.get("mtime")
-            mdt = _parse_iso(m) if isinstance(m, str) else None
-            if mdt is None:
-                checks.append(False)
-            else:
-                ok = True
-                for op, rhs in f.mtime.items():
-                    rdt = _parse_iso(rhs)
-                    if rdt is None:
-                        ok = False
-                        break
-                    if op == ">=" and not (mdt >= rdt):
-                        ok = False
-                    if op == "<=" and not (mdt <= rdt):
-                        ok = False
-                    if op == ">" and not (mdt > rdt):
-                        ok = False
-                    if op == "<" and not (mdt < rdt):
-                        ok = False
-                    if op == "==" and not (mdt == rdt):
-                        ok = False
-                    if not ok:
-                        break
-                checks.append(ok)
-
-        # autres clés libres (MetadataFilter.extra='allow')
-        for k, v in f.__dict__.items():
-            if k in {"language", "ext", "tags", "document_type", "mtime", "logic"}:
-                continue
-            if v is None:
-                continue
-            mv = meta.get(k)
-            if isinstance(v, list):
-                checks.append(
-                    str(mv).strip().lower() in [str(x).strip().lower() for x in v]
-                )
-            else:
-                checks.append(str(mv).strip().lower() == str(v).strip().lower())
-
-        if not checks:
-            return True  # pas de filtre = passe
-
-        return all(checks) if f.logic.upper() == "AND" else any(checks)
 
     def filter_embeddings(self, filter_metadata: Union[Dict[str, Any], MetadataFilter]):
         # support dict → modèle Pydantic
