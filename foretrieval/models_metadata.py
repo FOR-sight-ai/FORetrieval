@@ -1,5 +1,6 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Union
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union, Callable
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -19,7 +20,7 @@ class DocMetadata(BaseModel):
     document_type: Optional[str] = None
     short_description: Optional[str] = None
 
-    # --- Normalisations utiles ---
+    # --- Useful Normalisations ---
     @field_validator("ext", mode="before")
     def _norm_ext(cls, v):
         if v is None:
@@ -45,31 +46,31 @@ class DocMetadata(BaseModel):
             return None
         if isinstance(v, datetime):
             return v
-        # supporte 'Z'
+        # support 'Z'
         return datetime.fromisoformat(str(v).replace("Z", "+00:00"))
 
     def as_jsonable(self) -> Dict[str, Any]:
-        # utile pour l'export (datetime -> isoformat)
-        d = self.dict()
+        # useful for export (datetime -> isoformat)
+        d = self.model_dump()
         if d.get("mtime"):
             d["mtime"] = d["mtime"].isoformat()
         return d
 
 
 class MetadataFilter(BaseModel):
-    # valeurs simples OU listes
+    # simple values OR lists
     language: Optional[Union[str, List[str]]] = None
     ext: Optional[Union[str, List[str]]] = None
     tags: Optional[Union[str, List[str]]] = None
     document_type: Optional[Union[str, List[str]]] = None
-    # opérateurs sur mtime (ISO)
+    # operators on mtime (ISO)
     mtime: Optional[Dict[str, str]] = None  # ex: {">=":"2025-09-01T00:00:00Z"}
 
-    # logique globale
-    logic: str = "AND"  # "AND" ou "OR"
+    # global logic
+    logic: str = "AND"  # "AND" or "OR"
 
     class Config:
-        extra = "allow"  # autorise d'autres clés metadata si besoin
+        extra = "allow"  # allow other metadata keys if needed
 
     @field_validator("ext", mode="before")
     def _norm_filter_ext(cls, v):
@@ -90,3 +91,17 @@ class MetadataFilter(BaseModel):
         if isinstance(v, str):
             v = [v]
         return [str(t).strip().lower() for t in v]
+
+
+def build_metadata_list_for_dir(
+    input_dir: Path, provider: Callable[[Path], Dict[str, Any]]
+) -> List[Optional[DocMetadata]]:
+    items = list(input_dir.iterdir())
+    md_list: List[Optional[DocMetadata]] = []
+    for p in items:
+        if p.is_file():
+            raw = provider(p)
+            md_list.append(DocMetadata(**raw) if raw else None)
+        else:
+            md_list.append(None)
+    return md_list
