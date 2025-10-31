@@ -1,7 +1,7 @@
 from typing import Generator
 
 import pytest
-from colpali_engine.models import ColQwen2
+from colpali_engine.models import ColQwen2_5
 from colpali_engine.utils.torch_utils import get_torch_device, tear_down_torch
 
 from foretrieval import MultiModalRetrieverModel
@@ -13,7 +13,7 @@ def colqwen_rag_model() -> Generator[MultiModalRetrieverModel, None, None]:
     device = get_torch_device("auto")
     print(f"Using device: {device}")
     yield MultiModalRetrieverModel.from_pretrained(
-        "vidore/colqwen2-v0.1", device=device
+        "vidore/colqwen2.5-v0.2", device=device
     )
     tear_down_torch()
 
@@ -22,4 +22,4 @@ def colqwen_rag_model() -> Generator[MultiModalRetrieverModel, None, None]:
 def test_load_colqwen_from_pretrained(colqwen_rag_model: MultiModalRetrieverModel):
     assert isinstance(colqwen_rag_model, MultiModalRetrieverModel)
     assert isinstance(colqwen_rag_model.model, ColPaliModel)
-    assert isinstance(colqwen_rag_model.model.model, ColQwen2)
+    assert isinstance(colqwen_rag_model.model.model, ColQwen2_5)
