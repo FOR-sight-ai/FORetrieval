@@ -3,9 +3,6 @@ import subprocess
 import shutil
 from pathlib import Path
 from typing import Optional
-import subprocess
-import shutil
-from pathlib import Path
 
 
 def epub_to_pdf(epub_path: Path, pdf_path: Path) -> bool:
@@ -58,26 +55,12 @@ def _convert_to_pdf(input_file: Path) -> Optional[Path]:
     output_pdf = input_file.with_suffix(".pdf")
 
     if ext == ".epub":
-        calibre = shutil.which("ebook-convert")
-        if calibre:
-            try:
-                cmd = [calibre, str(input_file), str(output_pdf)]
-                subprocess.run(
-                    cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                )
-                if output_pdf.exists():
-                    print(f"✅ Converted via Calibre : {input_file}")
-                    return output_pdf
-            except Exception as e:
-                print(f"⚠️ EPUB conversion failed with Calibre : {input_file} ({e})")
-
-        # python fallback
         try:
             epub_to_pdf(input_file, output_pdf)
             if output_pdf.exists():
                 return output_pdf
         except Exception as e:
-            print(f"⚠️ Conversion EPUB→PDF failed (fallback) : {input_file} ({e})")
+            print(f"⚠️ Conversion EPUB→PDF failed: {input_file} ({e})")
         return None
 
     # LibreOffice
@@ -108,15 +91,29 @@ def _convert_to_pdf(input_file: Path) -> Optional[Path]:
             import win32com.client
 
             if ext in {".doc", ".docx", ".rtf"}:
-                word = win32com.client.DispatchEx("Word.Application")
-                word.Visible = False
-                doc = word.Documents.Open(str(input_file))
-                doc.SaveAs(str(output_pdf), FileFormat=17)  # wdFormatPDF
-                doc.Close(False)
-                word.Quit()
-                if output_pdf.exists():
-                    print(f"✅ Converted via MS Word : {input_file}")
-                    return output_pdf
+                try:
+                    word = win32com.client.DispatchEx("Word.Application")
+                    word.Visible = False
+                    doc = word.Documents.Open(str(input_file))
+                    doc.SaveAs(str(output_pdf), FileFormat=17)  # wdFormatPDF
+                    doc.Close(False)
+                    word.Quit()
+                    if output_pdf.exists():
+                        print(f"✅ Converted via MS Word : {input_file}")
+                        return output_pdf
+                except Exception as e:
+                    print(f"⚠️ MS Word conversion failed : {input_file} ({e})")
+                    # Fallback docx2pdf
+                    if ext == ".docx":
+                        try:
+                            from docx2pdf import convert
+
+                            convert(str(input_file), str(output_pdf))
+                            if output_pdf.exists():
+                                print(f"✅ Converted via docx2pdf : {input_file}")
+                                return output_pdf
+                        except Exception as e:
+                            print(f"⚠️ docx2pdf conversion failed: {input_file} ({e})")
             elif ext in {".xls", ".xlsx"}:
                 excel = win32com.client.DispatchEx("Excel.Application")
                 excel.Visible = False
@@ -138,18 +135,6 @@ def _convert_to_pdf(input_file: Path) -> Optional[Path]:
                     return output_pdf
         except Exception as e:
             print(f"⚠️ MS Office conversion failed : {input_file} ({e})")
-
-    # Fallback docx2pdf
-    if ext == ".docx":
-        try:
-            from docx2pdf import convert
-
-            convert(str(input_file), str(output_pdf))
-            if output_pdf.exists():
-                print(f"✅ Converted via docx2pdf : {input_file}")
-                return output_pdf
-        except Exception as e:
-            print(f"⚠️ docx2pdf conversion failed: {input_file} ({e})")
 
     # Fallback text → PDF
     if ext in {".txt", ".md", ".json", ".csv", ".yaml", ".yml", ".log"}:
