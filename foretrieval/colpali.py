@@ -608,13 +608,18 @@ class ColPaliModel:
                 else:
                     doc_md = metadata[doc_id] if metadata else None
 
-                self.add_to_index(
-                    item,
-                    store_collection_with_index,
-                    doc_id=doc_id,
-                    metadata=doc_md,
-                    batch_size=batch_size,
-                )
+                try:
+                    self.add_to_index(
+                        item,
+                        store_collection_with_index,
+                        doc_id=doc_id,
+                        metadata=doc_md,
+                        batch_size=batch_size,
+                    )
+                except Exception as e:
+                    logger.warning(f"Skipping faulty PDF {item}:\n{str(e)}")
+                    continue
+
         else:
             if metadata is not None and len(metadata) != 1:
                 raise ValueError(
