@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union, cast, Any, Callable
 
 from .utils import _value_match
-
+from .plot_utils import pil_from_base64, save_image_with_heatmap, compute_patch_heatmap, majority_token_id
 import srsly
 import torch
 from colpali_engine.models import (
@@ -79,6 +79,7 @@ class ColPaliModel:
         self.collection = {}
         self.indexed_embeddings = []
         self.embed_id_to_doc_id = {}
+        self.embed_id_to_extra = {}
         self.doc_id_to_metadata = {}
         self.doc_ids_to_file_names = {}
         self.doc_ids = set()
@@ -228,6 +229,17 @@ class ColPaliModel:
             self.embed_id_to_doc_id = {
                 int(k): v for k, v in self.embed_id_to_doc_id.items()
             }
+            # --- NEW: Load embed_id_to_extra ---
+            extra_path = Path(os.path.join(index_path, "embed_id_to_extra.pt"))
+            if extra_path.exists():
+                self.embed_id_to_extra = torch.load(extra_path, map_location="cpu")
+                # Safety: ensure int keys
+                self.embed_id_to_extra = {int(k): v for k, v in self.embed_id_to_extra.items()}
+            else:
+                self.embed_id_to_extra = {}
+                if self.verbose > 0:
+                    logger.debug("No embed_id_to_extra.pt found. Heatmaps won't work unless recomputed.")
+
             self.highest_doc_id = max(
                 int(entry["doc_id"]) for entry in self.embed_id_to_doc_id.values()
             )
@@ -341,7 +353,12 @@ class ColPaliModel:
             Path(os.path.join(index_path, "embed_id_to_doc_id.json.gz")),
             self.embed_id_to_doc_id,
         )
-
+        # --- NEW: Save embed_id_to_extra (needed for patch heatmaps) ---
+        # Contains tensors: input_ids, image_grid_thw, and orig_size per embed_id.
+        torch.save(
+            self.embed_id_to_extra,
+            os.path.join(index_path, "embed_id_to_extra.pt"),
+        )
         # Save doc_ids_to_file_names
         srsly.write_gzip_json(
             Path(os.path.join(index_path, "doc_ids_to_file_names.json.gz")),
@@ -892,6 +909,13 @@ class ColPaliModel:
         # Process images in batches
         processed_images = self.processor.process_images(images)
 
+        # --- NEW: garder des infos CPU pour debug/heatmap ---
+        # (avant de déplacer sur GPU)
+        input_ids_cpu = processed_images["input_ids"].detach().cpu()
+        grid_cpu = processed_images["image_grid_thw"].detach().cpu()
+        # Optionnel mais utile : taille originale de l'image
+        orig_sizes = [img.size for img in images]  # (W,H) PIL
+
         # Generate embeddings
         with torch.inference_mode():
             processed_images = {
@@ -912,6 +936,13 @@ class ColPaliModel:
             self.embed_id_to_doc_id[embed_id] = {
                 "doc_id": doc_id,
                 "page_id": int(page_id),
+            }
+
+            # --- NEW: stocker le mapping tokens image / grille ---
+            self.embed_id_to_extra[embed_id] = {
+                "input_ids": input_ids_cpu[i],            # shape [L] ex: [755]
+                "image_grid_thw": grid_cpu[i],            # shape [3] ex: [1,62,48]
+                "orig_size": orig_sizes[i],               # (W,H) de l'image originale
             }
 
             if store_collection_with_index:
@@ -964,7 +995,15 @@ class ColPaliModel:
             if idx in req_embedding_ids
         ]
         return req_embeddings, req_embedding_ids
-
+    
+    # --- NEW: calcul du token des images ---
+    def _get_image_token_id_from_extra(self, extra: dict) -> int:
+        # 1) si processor fournit (rare selon versions)
+        if hasattr(self.processor, "image_token_id"):
+            return int(self.processor.image_token_id)
+        # 2) sinon majorité dans input_ids
+        return majority_token_id(extra["input_ids"])
+    
     def search(
         self,
         query: str,
@@ -1008,9 +1047,17 @@ class ColPaliModel:
         # Get top k relevant pages
         top_pages = scores.argsort(axis=1)[0][-k:][::-1].tolist()
 
+        # Params viz / export
+        output_root = "output_heatmap"         # <= racine
+        shift_x, shift_y = .5, .5     # <= patch units (float OK)
+        topk_soft = k
+        temperature = 0.2
+        viz_interps = ["nearest", "bilinear"]  # 2 exports
+        modes = ["global_sum", "soft_topk"]    # uniquement ces 2 modes (faithful)
+
         # Create Result objects
         results = []
-        for embed_id in top_pages:
+        for rank, embed_id in enumerate(top_pages, start=1):   # rank = top_{rank}
             adjusted_embed_id = req_embedding_ids[embed_id]
             doc_info = self.embed_id_to_doc_id[adjusted_embed_id]
 
@@ -1019,15 +1066,77 @@ class ColPaliModel:
                 page_num=int(doc_info["page_id"]),
                 score=float(scores[0][embed_id]),
                 metadata=self.doc_id_to_metadata.get(int(doc_info["doc_id"]), {}),
-                base64=self.collection.get(adjusted_embed_id)
-                if return_base64_results
-                else None,
+                base64=self.collection.get(adjusted_embed_id) if return_base64_results else None,
             )
+
+            extra = self.embed_id_to_extra.get(adjusted_embed_id)
+            if extra is not None:
+                img_tok = self._get_image_token_id_from_extra(extra)
+                q_emb = qs[0]  # [Q,D] CPU
+                p_emb = self.indexed_embeddings[adjusted_embed_id]  # [L,D] CPU
+
+                # calc 2 heatmaps (faithful uniquement)
+                heatmaps = {}
+                for mode in modes:
+                    heat_2d, non_img = compute_patch_heatmap(
+                        q_emb=q_emb,
+                        p_emb=p_emb,
+                        input_ids=extra["input_ids"],
+                        image_grid_thw=extra["image_grid_thw"],
+                        image_token_id=img_tok,
+                        mode=mode,
+                        topk=topk_soft,
+                        temperature=temperature,
+                        normalize=False
+                    )
+                    heatmaps[mode] = heat_2d
+                    # (optionnel) log debug
+                    result.metadata = dict(result.metadata or {})
+                    result.metadata[f"{mode}_non_image_mass"] = non_img
+
+                result.metadata = dict(result.metadata or {})
+                result.metadata["heatmaps"] = heatmaps
+                result.metadata["image_token_id"] = img_tok
+
             results.append(result)
+
 
         if return_base64_results:
             for result in results:
                 self.fetch_result_img(result)
+
+        # save overlays (2 modes x 2 interps)
+        for rank, r in enumerate(results, start=1):
+            if not r.base64:
+                continue
+            img = pil_from_base64(r.base64)
+            hm = (r.metadata or {}).get("heatmaps", {})
+
+            for mode_name, heat_2d in hm.items():
+                for interp in viz_interps:
+                    # dossier qui encode: mode + interp + shift
+                    out_dir = os.path.join(
+                        output_root,
+                        f"{mode_name}",
+                        f"interp_{interp}",
+                        f"shift_x{shift_x}_y{shift_y}",
+                    )
+                    os.makedirs(out_dir, exist_ok=True)
+
+                    # nom fichier: top_{rank} puis doc/page
+                    out_file = os.path.join(
+                        out_dir,
+                        f"top_{rank}_doc{r.doc_id}_page{r.page_num}.png"
+                    )
+
+                    save_image_with_heatmap(
+                        img=img,
+                        heat_2d=heat_2d,
+                        output_file=out_file,
+                        resize_interp=interp,
+                        shift_x=shift_x,
+                        shift_y=shift_y,
+                    )
 
         return results
 
