@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union, cast, Any, Callable
 
 from .utils import _value_match
-from .plot_utils import pil_from_base64, save_image_with_heatmap, compute_patch_heatmap, majority_token_id
+from .plot_utils import pil_from_base64, save_image_with_heatmap, compute_patch_heatmap, majority_token_id, heatmap_overlay_base64
 import srsly
 import torch
 from colpali_engine.models import (
@@ -1047,14 +1047,6 @@ class ColPaliModel:
         # Get top k relevant pages
         top_pages = scores.argsort(axis=1)[0][-k:][::-1].tolist()
 
-        # Params viz / export
-        output_root = "output_heatmap"         # <= racine
-        shift_x, shift_y = .5, .5     # <= patch units (float OK)
-        topk_soft = k
-        temperature = 0.2
-        viz_interps = ["nearest", "bilinear"]  # 2 exports
-        modes = ["global_sum", "soft_topk"]    # uniquement ces 2 modes (faithful)
-
         # Create Result objects
         results = []
         for rank, embed_id in enumerate(top_pages, start=1):   # rank = top_{rank}
@@ -1076,27 +1068,19 @@ class ColPaliModel:
                 p_emb = self.indexed_embeddings[adjusted_embed_id]  # [L,D] CPU
 
                 # calc 2 heatmaps (faithful uniquement)
-                heatmaps = {}
-                for mode in modes:
-                    heat_2d, non_img = compute_patch_heatmap(
-                        q_emb=q_emb,
-                        p_emb=p_emb,
-                        input_ids=extra["input_ids"],
-                        image_grid_thw=extra["image_grid_thw"],
-                        image_token_id=img_tok,
-                        mode=mode,
-                        topk=topk_soft,
-                        temperature=temperature,
-                        normalize=False
-                    )
-                    heatmaps[mode] = heat_2d
-                    # (optionnel) log debug
-                    result.metadata = dict(result.metadata or {})
-                    result.metadata[f"{mode}_non_image_mass"] = non_img
-
+                heat_2d, _ = compute_patch_heatmap(
+                    q_emb=q_emb,
+                    p_emb=p_emb,
+                    input_ids=extra["input_ids"],
+                    image_grid_thw=extra["image_grid_thw"],
+                    image_token_id=img_tok,
+                    mode="soft_topk", # global_sum ou soft_topk
+                    topk=k,
+                    temperature=0.2,
+                    normalize=False,
+                )
                 result.metadata = dict(result.metadata or {})
-                result.metadata["heatmaps"] = heatmaps
-                result.metadata["image_token_id"] = img_tok
+                result.metadata["heat_2d_soft_topk"] = heat_2d  # on garde le tensor ici (RAM)
 
             results.append(result)
 
@@ -1105,38 +1089,23 @@ class ColPaliModel:
             for result in results:
                 self.fetch_result_img(result)
 
-        # save overlays (2 modes x 2 interps)
-        for rank, r in enumerate(results, start=1):
-            if not r.base64:
-                continue
-            img = pil_from_base64(r.base64)
-            hm = (r.metadata or {}).get("heatmaps", {})
-
-            for mode_name, heat_2d in hm.items():
-                for interp in viz_interps:
-                    # dossier qui encode: mode + interp + shift
-                    out_dir = os.path.join(
-                        output_root,
-                        f"{mode_name}",
-                        f"interp_{interp}",
-                        f"shift_x{shift_x}_y{shift_y}",
-                    )
-                    os.makedirs(out_dir, exist_ok=True)
-
-                    # nom fichier: top_{rank} puis doc/page
-                    out_file = os.path.join(
-                        out_dir,
-                        f"top_{rank}_doc{r.doc_id}_page{r.page_num}.png"
-                    )
-
-                    save_image_with_heatmap(
-                        img=img,
-                        heat_2d=heat_2d,
-                        output_file=out_file,
-                        resize_interp=interp,
-                        shift_x=shift_x,
-                        shift_y=shift_y,
-                    )
+            for result in results:
+                if not result.base64:
+                    continue
+                heat_2d = (result.metadata or {}).get("heat_2d_soft_topk")
+                if heat_2d is None:
+                    continue
+                img = pil_from_base64(result.base64)
+                overlay_b64 = heatmap_overlay_base64(
+                    img=img,
+                    heat_2d=heat_2d,
+                    resize_interp="bilinear", # nearest ou bilinear
+                    shift_x=0.5,
+                    shift_y=0.5,
+                    alpha=0.45,
+                    cmap="jet",
+                )
+                result.metadata["heatmap_base64"] = overlay_b64
 
         return results
 

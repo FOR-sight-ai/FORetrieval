@@ -4,6 +4,7 @@ import io
 import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import torch
 import torch.nn.functional as F
 
@@ -96,6 +97,90 @@ def save_image_with_heatmap(
     plt.savefig(output_file, bbox_inches="tight", pad_inches=0)
     plt.close(fig)
     print(f"Saved: {output_file}")
+
+
+def heatmap_overlay_base64(
+    img: Image.Image,
+    heat_2d,
+    alpha: float = 0.45,
+    cmap: str = "jet",
+    resize_interp: str = "bilinear",  # "nearest" | "bilinear"
+    shift_x: float = 0.0,             # patch units
+    shift_y: float = 0.0,             # patch units
+) -> str:
+    """
+    Retourne une image overlay (PNG) encodée en base64.
+    Shift = translation d'affichage uniquement (en pixels, via conversion patch->pixel).
+    """
+
+    # heat -> numpy
+    if hasattr(heat_2d, "detach"):
+        heat = heat_2d.detach().cpu().numpy()
+    else:
+        heat = np.array(heat_2d)
+
+    # normalize 0..1 (viz)
+    heat = heat - heat.min()
+    if heat.max() > 1e-9:
+        heat = heat / heat.max()
+
+    W, H = img.size
+    hpatch, wpatch = heat.shape
+
+    # upscale heatmap to image size
+    heat_img = Image.fromarray((heat * 255).astype(np.uint8))
+    if resize_interp.lower() == "nearest":
+        resample = Image.NEAREST
+    elif resize_interp.lower() == "bilinear":
+        resample = Image.BILINEAR
+    else:
+        raise ValueError("resize_interp doit être 'nearest' ou 'bilinear'")
+
+    heat_img = heat_img.resize((W, H), resample=resample)
+    heat_img = np.array(heat_img)  # uint8 [H,W]
+
+    # ---- shift affichage-only (patch units -> pixels) ----
+    if abs(shift_x) > 1e-9 or abs(shift_y) > 1e-9:
+        px_per_patch_x = W / float(wpatch)
+        px_per_patch_y = H / float(hpatch)
+        shift_px_x = int(round(shift_x * px_per_patch_x))
+        shift_px_y = int(round(shift_y * px_per_patch_y))
+
+        shifted = np.zeros_like(heat_img)
+
+        x_src0 = max(0, -shift_px_x)
+        y_src0 = max(0, -shift_px_y)
+        x_dst0 = max(0, shift_px_x)
+        y_dst0 = max(0, shift_px_y)
+
+        x_w = W - max(0, shift_px_x) - max(0, -shift_px_x)
+        y_h = H - max(0, shift_px_y) - max(0, -shift_px_y)
+
+        if x_w > 0 and y_h > 0:
+            shifted[y_dst0:y_dst0+y_h, x_dst0:x_dst0+x_w] = heat_img[y_src0:y_src0+y_h, x_src0:x_src0+x_w]
+
+        heat_img = shifted
+
+    # ---- colorize heatmap with matplotlib colormap ----
+    # heat_img is 0..255
+    heat_f = heat_img.astype(np.float32) / 255.0  # 0..1
+    cmap_fn = cm.get_cmap(cmap)
+    rgba = cmap_fn(heat_f)  # float RGBA [H,W,4] in 0..1
+    heat_rgb = (rgba[..., :3] * 255).astype(np.uint8)
+
+    # ---- alpha blend with background ----
+    base = np.array(img).astype(np.float32)
+    overlay = heat_rgb.astype(np.float32)
+
+    blended = (1 - alpha) * base + alpha * overlay
+    blended = np.clip(blended, 0, 255).astype(np.uint8)
+
+    out_pil = Image.fromarray(blended, mode="RGB")
+
+    # ---- encode PNG base64 ----
+    buf = io.BytesIO()
+    out_pil.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 @torch.no_grad()
 def compute_patch_heatmap(
