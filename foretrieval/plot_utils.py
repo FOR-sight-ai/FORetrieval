@@ -19,40 +19,91 @@ def majority_token_id(input_ids: torch.Tensor) -> int:
     u, c = torch.unique(input_ids.cpu(), return_counts=True)
     return int(u[torch.argmax(c)].item())
 
+def grow_heatmap_patches(
+    heat_2d: torch.Tensor,
+    patch_grow_pct: float = 100.0,   # 100 = identique, 200 = +, etc.
+    mode: str = "max",               # "max" | "mean"
+):
+    if patch_grow_pct is None:
+        patch_grow_pct = 100.0
+    if patch_grow_pct <= 100.0:
+        return heat_2d
+
+    # Convert pct -> radius (heuristique simple)
+    scale = patch_grow_pct / 100.0
+    radius = int(round((scale - 1.0) * 1.0))  # 200% -> 1 ; 300% -> 2
+    radius = max(1, radius)
+    k = 2 * radius + 1
+
+    x = heat_2d.float()[None, None, :, :]  # [1,1,H,W]
+
+    if mode == "max":
+        y = F.max_pool2d(x, kernel_size=k, stride=1, padding=radius)
+    elif mode == "mean":
+        y = F.avg_pool2d(x, kernel_size=k, stride=1, padding=radius)
+    else:
+        raise ValueError("mode must be 'max' or 'mean'")
+
+    return y[0, 0]
+
 def pil_from_base64(b64: str) -> Image.Image:
     data = base64.b64decode(b64)
     return Image.open(io.BytesIO(data)).convert("RGB")
 
-def save_image_with_heatmap(
+def grow_heatmap_patches_torch(
+    heat_2d: torch.Tensor,
+    patch_grow_pct: float = 100.0,   # 100 = no-op
+    grow_mode: str = "max",          # "max" | "mean"
+) -> torch.Tensor:
+    if patch_grow_pct is None or patch_grow_pct <= 100.0:
+        return heat_2d
+
+    scale = float(patch_grow_pct) / 100.0
+    # 200% -> radius=1 (3x3), 300% -> radius=2 (5x5)...
+    radius = int(round(scale - 1.0))
+    radius = max(1, radius)
+    k = 2 * radius + 1
+
+    x = heat_2d.float()[None, None, :, :]  # [1,1,H,W]
+    if grow_mode == "max":
+        y = F.max_pool2d(x, kernel_size=k, stride=1, padding=radius)
+    elif grow_mode == "mean":
+        y = F.avg_pool2d(x, kernel_size=k, stride=1, padding=radius)
+    else:
+        raise ValueError("grow_mode doit être 'max' ou 'mean'")
+    return y[0, 0]
+
+def heatmap_overlay_base64(
     img: Image.Image,
     heat_2d,
-    output_file: str,
     alpha: float = 0.45,
     cmap: str = "jet",
-    dpi: int = 200,
-    resize_interp: str = "bilinear",  # "nearest" | "bilinear"
-    shift_x: float = 0.0,            # en patch units
-    shift_y: float = 0.0,            # en patch units
-):
-    """
-    Sauvegarde image + heatmap overlay en PNG.
-    resize_interp = méthode d'upscale de la heatmap vers la taille image.
-    """
-
+    resize_interp: str = "bilinear",
+    shift_x: float = 0.0,
+    shift_y: float = 0.0,
+    patch_grow_pct: float = 100.0,   # NEW
+    grow_mode: str = "max",          # NEW
+) -> str:
+    # --- optionally grow patches (in patch-grid space) ---
     if hasattr(heat_2d, "detach"):
-        heat = heat_2d.detach().cpu().numpy()
+        heat_t = heat_2d.detach()
     else:
-        heat = np.array(heat_2d)
+        heat_t = torch.tensor(np.array(heat_2d), dtype=torch.float32)
 
-    # normalisation 0..1 (viz)
+    if patch_grow_pct is not None and patch_grow_pct > 100.0:
+        heat_t = grow_heatmap_patches_torch(heat_t, patch_grow_pct=patch_grow_pct, grow_mode=grow_mode)
+
+    heat = heat_t.cpu().numpy()
+
+    # normalize 0..1 (viz)
     heat = heat - heat.min()
     if heat.max() > 1e-9:
         heat = heat / heat.max()
 
     W, H = img.size
+    hpatch, wpatch = heat.shape
 
     heat_img = Image.fromarray((heat * 255).astype(np.uint8))
-
     if resize_interp.lower() == "nearest":
         resample = Image.NEAREST
     elif resize_interp.lower() == "bilinear":
@@ -63,83 +114,7 @@ def save_image_with_heatmap(
     heat_img = heat_img.resize((W, H), resample=resample)
     heat_img = np.array(heat_img)
 
-    # --- SHIFT AFFICHAGE UNIQUEMENT (en pixels) ---
-    if abs(shift_x) > 1e-9 or abs(shift_y) > 1e-9:
-        # conversion patch->pixel
-        hpatch, wpatch = heat.shape
-        px_per_patch_x = W / float(wpatch)
-        px_per_patch_y = H / float(hpatch)
-        shift_px_x = int(round(shift_x * px_per_patch_x))
-        shift_px_y = int(round(shift_y * px_per_patch_y))
-
-        shifted = np.zeros_like(heat_img)
-
-        # décalage avec padding 0 (pas de wrap)
-        x_src0 = max(0, -shift_px_x)
-        y_src0 = max(0, -shift_px_y)
-        x_dst0 = max(0, shift_px_x)
-        y_dst0 = max(0, shift_px_y)
-
-        x_w = W - max(0, shift_px_x) - max(0, -shift_px_x)
-        y_h = H - max(0, shift_px_y) - max(0, -shift_px_y)
-
-        if x_w > 0 and y_h > 0:
-            shifted[y_dst0:y_dst0+y_h, x_dst0:x_dst0+x_w] = heat_img[y_src0:y_src0+y_h, x_src0:x_src0+x_w]
-        heat_img = shifted
-
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
-
-    fig = plt.figure(figsize=(W / 100, H / 100), dpi=dpi)
-    plt.imshow(img)
-    plt.imshow(heat_img, alpha=alpha, cmap=cmap)
-    plt.axis("off")
-    plt.tight_layout(pad=0)
-    plt.savefig(output_file, bbox_inches="tight", pad_inches=0)
-    plt.close(fig)
-    print(f"Saved: {output_file}")
-
-
-def heatmap_overlay_base64(
-    img: Image.Image,
-    heat_2d,
-    alpha: float = 0.45,
-    cmap: str = "jet",
-    resize_interp: str = "bilinear",  # "nearest" | "bilinear"
-    shift_x: float = 0.0,             # patch units
-    shift_y: float = 0.0,             # patch units
-) -> str:
-    """
-    Retourne une image overlay (PNG) encodée en base64.
-    Shift = translation d'affichage uniquement (en pixels, via conversion patch->pixel).
-    """
-
-    # heat -> numpy
-    if hasattr(heat_2d, "detach"):
-        heat = heat_2d.detach().cpu().numpy()
-    else:
-        heat = np.array(heat_2d)
-
-    # normalize 0..1 (viz)
-    heat = heat - heat.min()
-    if heat.max() > 1e-9:
-        heat = heat / heat.max()
-
-    W, H = img.size
-    hpatch, wpatch = heat.shape
-
-    # upscale heatmap to image size
-    heat_img = Image.fromarray((heat * 255).astype(np.uint8))
-    if resize_interp.lower() == "nearest":
-        resample = Image.NEAREST
-    elif resize_interp.lower() == "bilinear":
-        resample = Image.BILINEAR
-    else:
-        raise ValueError("resize_interp doit être 'nearest' ou 'bilinear'")
-
-    heat_img = heat_img.resize((W, H), resample=resample)
-    heat_img = np.array(heat_img)  # uint8 [H,W]
-
-    # ---- shift affichage-only (patch units -> pixels) ----
+    # shift display-only
     if abs(shift_x) > 1e-9 or abs(shift_y) > 1e-9:
         px_per_patch_x = W / float(wpatch)
         px_per_patch_y = H / float(hpatch)
@@ -147,40 +122,58 @@ def heatmap_overlay_base64(
         shift_px_y = int(round(shift_y * px_per_patch_y))
 
         shifted = np.zeros_like(heat_img)
-
-        x_src0 = max(0, -shift_px_x)
-        y_src0 = max(0, -shift_px_y)
-        x_dst0 = max(0, shift_px_x)
-        y_dst0 = max(0, shift_px_y)
-
+        x_src0 = max(0, -shift_px_x); y_src0 = max(0, -shift_px_y)
+        x_dst0 = max(0,  shift_px_x); y_dst0 = max(0,  shift_px_y)
         x_w = W - max(0, shift_px_x) - max(0, -shift_px_x)
         y_h = H - max(0, shift_px_y) - max(0, -shift_px_y)
-
         if x_w > 0 and y_h > 0:
             shifted[y_dst0:y_dst0+y_h, x_dst0:x_dst0+x_w] = heat_img[y_src0:y_src0+y_h, x_src0:x_src0+x_w]
-
         heat_img = shifted
 
-    # ---- colorize heatmap with matplotlib colormap ----
-    # heat_img is 0..255
-    heat_f = heat_img.astype(np.float32) / 255.0  # 0..1
+    # colorize + blend (comme ton code)
+    heat_f = heat_img.astype(np.float32) / 255.0
     cmap_fn = cm.get_cmap(cmap)
-    rgba = cmap_fn(heat_f)  # float RGBA [H,W,4] in 0..1
+    rgba = cmap_fn(heat_f)
     heat_rgb = (rgba[..., :3] * 255).astype(np.uint8)
 
-    # ---- alpha blend with background ----
     base = np.array(img).astype(np.float32)
     overlay = heat_rgb.astype(np.float32)
-
     blended = (1 - alpha) * base + alpha * overlay
     blended = np.clip(blended, 0, 255).astype(np.uint8)
 
     out_pil = Image.fromarray(blended, mode="RGB")
-
-    # ---- encode PNG base64 ----
     buf = io.BytesIO()
     out_pil.save(buf, format="PNG")
     return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+def build_heatmap_overlays_base64(
+    img: Image.Image,
+    heatmaps: dict,
+    interps=("nearest", "bilinear"),
+    alpha=0.45,
+    cmap="jet",
+    shift_x=0.0,
+    shift_y=0.0,
+    patch_grow_pct=100.0,
+    grow_mode="max",
+):
+    overlays = {}
+    for mode, pack in heatmaps.items():
+        heat_2d = pack["heat_2d"]
+        overlays[mode] = {}
+        for interp in interps:
+            overlays[mode][interp] = heatmap_overlay_base64(
+                img=img,
+                heat_2d=heat_2d,
+                alpha=alpha,
+                cmap=cmap,
+                resize_interp=interp,
+                shift_x=shift_x,
+                shift_y=shift_y,
+                patch_grow_pct=patch_grow_pct,
+                grow_mode=grow_mode,
+            )
+    return overlays
 
 @torch.no_grad()
 def compute_patch_heatmap(

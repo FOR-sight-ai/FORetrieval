@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union, cast, Any, Callable
 
 from .utils import _value_match
-from .plot_utils import pil_from_base64, save_image_with_heatmap, compute_patch_heatmap, majority_token_id, heatmap_overlay_base64
+from .plot_utils import pil_from_base64, compute_patch_heatmap, majority_token_id, build_heatmap_overlays_base64
 import srsly
 import torch
 from colpali_engine.models import (
@@ -1011,45 +1011,36 @@ class ColPaliModel:
         filter_metadata: Optional[Dict[str, str]] = None,
         return_base64_results: Optional[bool] = None,
     ) -> List[Result]:
-        # Set default value for return_base64_results if not provided
+
         if return_base64_results is None:
             return_base64_results = bool(self.collection)
 
-        # Ensure k is not larger than the number of indexed documents
         k = min(k, len(self.indexed_embeddings))
 
-        # Process query
         with torch.inference_mode():
             batch_query = self.processor.process_queries([query])
             batch_query = {
-                k: v.to(self.device).to(
+                kk: vv.to(self.device).to(
                     self.model.dtype
-                    if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
-                    else v.dtype
+                    if vv.dtype in [torch.float16, torch.bfloat16, torch.float32]
+                    else vv.dtype
                 )
-                for k, v in batch_query.items()
+                for kk, vv in batch_query.items()
             }
             embeddings_query = self.model(**batch_query)
             qs = list(torch.unbind(embeddings_query.to("cpu")))
 
-        # Get embeddings to search against
         if filter_metadata:
             req_embeddings, req_embedding_ids = self.filter_embeddings(filter_metadata)
         else:
             req_embeddings = self.indexed_embeddings
             req_embedding_ids = list(range(len(self.indexed_embeddings)))
 
-        # Compute scores (toujours)
-        scores = (
-            self.processor.score(qs, req_embeddings, device=self.device).cpu().numpy()
-        )
-
-        # Get top k relevant pages
+        scores = self.processor.score(qs, req_embeddings, device=self.device).cpu().numpy()
         top_pages = scores.argsort(axis=1)[0][-k:][::-1].tolist()
 
-        # Create Result objects
-        results = []
-        for rank, embed_id in enumerate(top_pages, start=1):   # rank = top_{rank}
+        results: List[Result] = []
+        for rank, embed_id in enumerate(top_pages, start=1):
             adjusted_embed_id = req_embedding_ids[embed_id]
             doc_info = self.embed_id_to_doc_id[adjusted_embed_id]
 
@@ -1064,48 +1055,55 @@ class ColPaliModel:
             extra = self.embed_id_to_extra.get(adjusted_embed_id)
             if extra is not None:
                 img_tok = self._get_image_token_id_from_extra(extra)
-                q_emb = qs[0]  # [Q,D] CPU
-                p_emb = self.indexed_embeddings[adjusted_embed_id]  # [L,D] CPU
+                q_emb = qs[0]  # CPU
+                p_emb = self.indexed_embeddings[adjusted_embed_id]  # CPU
 
-                # calc 2 heatmaps (faithful uniquement)
-                heat_2d, _ = compute_patch_heatmap(
-                    q_emb=q_emb,
-                    p_emb=p_emb,
-                    input_ids=extra["input_ids"],
-                    image_grid_thw=extra["image_grid_thw"],
-                    image_token_id=img_tok,
-                    mode="soft_topk", # global_sum ou soft_topk
-                    topk=k,
-                    temperature=0.2,
-                    normalize=False,
-                )
+                heatmaps = {}
+                for mode in ("global_sum", "soft_topk"):
+                    heat_2d, _ = compute_patch_heatmap(
+                        q_emb=q_emb,
+                        p_emb=p_emb,
+                        input_ids=extra["input_ids"],
+                        image_grid_thw=extra["image_grid_thw"],
+                        image_token_id=img_tok,
+                        mode=mode,
+                        topk=k,
+                        temperature=0.2,
+                        normalize=False,
+                    )
+                    heatmaps[mode] = {"heat_2d": heat_2d}
+
                 result.metadata = dict(result.metadata or {})
-                result.metadata["heat_2d_soft_topk"] = heat_2d  # on garde le tensor ici (RAM)
+                result.metadata["heatmaps"] = heatmaps
 
             results.append(result)
 
-
         if return_base64_results:
-            for result in results:
-                self.fetch_result_img(result)
+            # 1) populate base64 exactly once
+            for r in results:
+                self.fetch_result_img(r)
 
-            for result in results:
-                if not result.base64:
+            # 2) build overlays from the already-loaded base64
+            for r in results:
+                if not r.base64:
                     continue
-                heat_2d = (result.metadata or {}).get("heat_2d_soft_topk")
-                if heat_2d is None:
+                hm = (r.metadata or {}).get("heatmaps")
+                if not hm:
                     continue
-                img = pil_from_base64(result.base64)
-                overlay_b64 = heatmap_overlay_base64(
+
+                img = pil_from_base64(r.base64)  # decode once per result
+
+                r.metadata["heatmap_overlays_base64"] = build_heatmap_overlays_base64(
                     img=img,
-                    heat_2d=heat_2d,
-                    resize_interp="bilinear", # nearest ou bilinear
-                    shift_x=0.5,
-                    shift_y=0.5,
+                    heatmaps=hm,
+                    interps=("nearest", "bilinear"),
                     alpha=0.45,
                     cmap="jet",
+                    shift_x=0.0,
+                    shift_y=0.0,
+                    patch_grow_pct=300.0,
+                    grow_mode="mean",
                 )
-                result.metadata["heatmap_base64"] = overlay_b64
 
         return results
 
