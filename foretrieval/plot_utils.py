@@ -2,7 +2,7 @@ import os
 import base64
 import io
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import torch
@@ -19,36 +19,75 @@ def majority_token_id(input_ids: torch.Tensor) -> int:
     u, c = torch.unique(input_ids.cpu(), return_counts=True)
     return int(u[torch.argmax(c)].item())
 
-def grow_heatmap_patches(
-    heat_2d: torch.Tensor,
-    patch_grow_pct: float = 100.0,   # 100 = identique, 200 = +, etc.
-    mode: str = "max",               # "max" | "mean"
-):
-    if patch_grow_pct is None:
-        patch_grow_pct = 100.0
-    if patch_grow_pct <= 100.0:
-        return heat_2d
-
-    # Convert pct -> radius (heuristique simple)
-    scale = patch_grow_pct / 100.0
-    radius = int(round((scale - 1.0) * 1.0))  # 200% -> 1 ; 300% -> 2
-    radius = max(1, radius)
-    k = 2 * radius + 1
-
-    x = heat_2d.float()[None, None, :, :]  # [1,1,H,W]
-
-    if mode == "max":
-        y = F.max_pool2d(x, kernel_size=k, stride=1, padding=radius)
-    elif mode == "mean":
-        y = F.avg_pool2d(x, kernel_size=k, stride=1, padding=radius)
-    else:
-        raise ValueError("mode must be 'max' or 'mean'")
-
-    return y[0, 0]
+def pil_to_base64_png(im: Image.Image) -> str:
+    buf = io.BytesIO()
+    im.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 def pil_from_base64(b64: str) -> Image.Image:
     data = base64.b64decode(b64)
     return Image.open(io.BytesIO(data)).convert("RGB")
+
+def draw_circle_on_max_patch(
+    img: Image.Image,
+    heat_2d,                       # torch.Tensor [Hp,Wp] ou np array
+    circle_scale_pct: float = 600.0,  # 300% => diamètre 3x patch
+    outline_width: int = 10,
+    add_double_stroke: bool = True,
+    shift_x: float = 0.0,          # même sémantique que ton heatmap_overlay_base64
+    shift_y: float = 0.0,
+    color_inner=(255, 255, 255, 255), # blanc
+    color_outer=(0, 0, 0, 255),       # noir
+) -> Image.Image:
+    """
+    Dessine un cercle (anneau) centré sur le patch max de heat_2d.
+    circle_scale_pct est relatif à la taille DU PATCH en pixels :
+      - 100% => diamètre == patch_w/patch_h (on prend une moyenne)
+      - 300% => diamètre == 3x patch (donc rayon == 1.5x patch)
+    """
+
+    # --- heat -> numpy + argmax ---
+    if hasattr(heat_2d, "detach"):
+        heat_np = heat_2d.detach().float().cpu().numpy()
+    else:
+        heat_np = np.array(heat_2d, dtype=np.float32)
+
+    Hp, Wp = heat_np.shape
+    flat_idx = int(np.argmax(heat_np))
+    r = flat_idx // Wp
+    c = flat_idx % Wp
+
+    # --- patch size in pixels ---
+    W, H = img.size
+    patch_w = W / float(Wp)
+    patch_h = H / float(Hp)
+
+    # centre du patch (c,r) en pixels
+    cx = (c + 0.5) * patch_w
+    cy = (r + 0.5) * patch_h
+
+    # appliquer le même shift “display-only” que ton overlay (en unités patch)
+    cx += shift_x * patch_w
+    cy += shift_y * patch_h
+
+    # on prend un rayon basé sur la moyenne des dimensions patch
+    scale = float(circle_scale_pct) / 100.0
+    radius = 0.5 * max(patch_w, patch_h) * scale
+
+    # --- draw (sur une copie RGBA pour alpha) ---
+    out = img.convert("RGBA")
+    draw = ImageDraw.Draw(out)
+
+    bbox = (cx - radius, cy - radius, cx + radius, cy + radius)
+
+    if add_double_stroke:
+        # stroke noir plus large + stroke blanc par-dessus (super lisible)
+        draw.ellipse(bbox, outline=color_outer, width=outline_width + 2)
+        draw.ellipse(bbox, outline=color_inner, width=outline_width)
+    else:
+        draw.ellipse(bbox, outline=color_inner, width=outline_width)
+
+    return pil_to_base64_png(out.convert("RGB"))
 
 def grow_heatmap_patches_torch(
     heat_2d: torch.Tensor,

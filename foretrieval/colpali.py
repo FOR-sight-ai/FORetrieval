@@ -8,7 +8,14 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union, cast, Any, Callable
 
 from .utils import _value_match
-from .plot_utils import pil_from_base64, compute_patch_heatmap, majority_token_id, build_heatmap_overlays_base64
+from .plot_utils import (
+    draw_circle_on_max_patch,
+    pil_from_base64,
+    pil_to_base64_png,
+    compute_patch_heatmap,
+    majority_token_id,
+    build_heatmap_overlays_base64
+)
 import srsly
 import torch
 from colpali_engine.models import (
@@ -1087,13 +1094,14 @@ class ColPaliModel:
             for r in results:
                 if not r.base64:
                     continue
-                hm = (r.metadata or {}).get("heatmaps")
+                meta = r.metadata or {}
+                hm = meta.get("heatmaps")
                 if not hm:
                     continue
 
                 img = pil_from_base64(r.base64)  # decode once per result
 
-                r.metadata["heatmap_overlays_base64"] = build_heatmap_overlays_base64(
+                meta["heatmap_overlays_base64"] = build_heatmap_overlays_base64(
                     img=img,
                     heatmaps=hm,
                     interps=("nearest", "bilinear"),
@@ -1105,6 +1113,15 @@ class ColPaliModel:
                     grow_mode="mean",
                 )
 
+                # 3) Draw circle on max patch
+                soft = hm["soft_topk"]["heat_2d"]
+                if soft is not None:
+                    img_marked = draw_circle_on_max_patch(
+                        img=img,
+                        heat_2d=soft
+                    )
+                    meta["soft_topk_max_patch_circle_base64"] = img_marked
+                r.metadata = meta
         return results
 
     def encode_image(
