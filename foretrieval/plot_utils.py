@@ -87,7 +87,7 @@ def draw_circle_on_max_patch(
     else:
         draw.ellipse(bbox, outline=color_inner, width=outline_width)
 
-    return pil_to_base64_png(out.convert("RGB"))
+    return out.convert("RGB")
 
 def grow_heatmap_patches_torch(
     heat_2d: torch.Tensor,

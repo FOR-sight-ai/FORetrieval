@@ -90,7 +90,8 @@ class ColPaliModel:
         self.doc_id_to_metadata = {}
         self.doc_ids_to_file_names = {}
         self.doc_ids = set()
-
+        self.enable_heatmaps = False
+        self.enable_circle = False
         self.SOURCE_EXTS = {
             ".doc",
             ".docx",
@@ -1011,12 +1012,16 @@ class ColPaliModel:
         # 2) sinon majorité dans input_ids
         return majority_token_id(extra["input_ids"])
     
+    def set_enable_heatmaps_and_circle(self, enable_heatmaps: bool, enable_circle: bool):
+        self.enable_heatmaps = enable_heatmaps
+        self.enable_circle = enable_circle
+
     def search(
         self,
         query: str,
         k: int = 10,
         filter_metadata: Optional[Dict[str, str]] = None,
-        return_base64_results: Optional[bool] = None,
+        return_base64_results: Optional[bool] = None
     ) -> List[Result]:
 
         if return_base64_results is None:
@@ -1060,29 +1065,49 @@ class ColPaliModel:
             )
 
             extra = self.embed_id_to_extra.get(adjusted_embed_id)
-            if extra is not None:
-                img_tok = self._get_image_token_id_from_extra(extra)
-                q_emb = qs[0]  # CPU
-                p_emb = self.indexed_embeddings[adjusted_embed_id]  # CPU
+            need_patch = (self.enable_heatmaps or self.enable_circle)
 
-                heatmaps = {}
-                for mode in ("global_sum", "soft_topk"):
-                    heat_2d, _ = compute_patch_heatmap(
+            if need_patch and extra is not None:
+                img_tok = self._get_image_token_id_from_extra(extra)
+                q_emb = qs[0]
+                p_emb = self.indexed_embeddings[adjusted_embed_id]
+
+                result.metadata = dict(result.metadata or {})
+                heat_soft, heat_global = None, None
+
+                # 1) soft_topk : requis si cercle OU heatmaps
+                if self.enable_circle or self.enable_heatmaps:
+                    heat_soft, _ = compute_patch_heatmap(
                         q_emb=q_emb,
                         p_emb=p_emb,
                         input_ids=extra["input_ids"],
                         image_grid_thw=extra["image_grid_thw"],
                         image_token_id=img_tok,
-                        mode=mode,
+                        mode="soft_topk",
+                        topk=min(k, 8),      # tip: topk plus petit suffit souvent
+                        temperature=0.2,
+                        normalize=False,
+                    )
+
+                # 3) Heatmaps complètes uniquement si demandé
+                if self.enable_heatmaps:
+                    heat_global, _ = compute_patch_heatmap(
+                        q_emb=q_emb,
+                        p_emb=p_emb,
+                        input_ids=extra["input_ids"],
+                        image_grid_thw=extra["image_grid_thw"],
+                        image_token_id=img_tok,
+                        mode="global_sum",
                         topk=k,
                         temperature=0.2,
                         normalize=False,
                     )
-                    heatmaps[mode] = {"heat_2d": heat_2d}
 
-                result.metadata = dict(result.metadata or {})
-                result.metadata["heatmaps"] = heatmaps
-
+                if self.enable_heatmaps or self.enable_circle:
+                    hm = {"soft_topk": {"heat_2d": heat_soft}}
+                    if self.enable_heatmaps:
+                        hm["global_sum"] = {"heat_2d": heat_global}
+                    result.metadata["heatmaps"] = hm
             results.append(result)
 
         if return_base64_results:
@@ -1090,37 +1115,48 @@ class ColPaliModel:
             for r in results:
                 self.fetch_result_img(r)
 
-            # 2) build overlays from the already-loaded base64
+            # 2) build optional overlays / circle from already-loaded base64
             for r in results:
                 if not r.base64:
                     continue
+
                 meta = r.metadata or {}
-                hm = meta.get("heatmaps")
-                if not hm:
+
+                need_overlay, need_circle = bool(self.enable_heatmaps), bool(self.enable_circle)
+
+                # rien à faire
+                if not (need_overlay or need_circle):
                     continue
 
-                img = pil_from_base64(r.base64)  # decode once per result
+                # heatmaps nécessaires si overlay, et utiles pour circle (soft_topk)
+                hm = meta.get("heatmaps") or {}
 
-                meta["heatmap_overlays_base64"] = build_heatmap_overlays_base64(
-                    img=img,
-                    heatmaps=hm,
-                    interps=("nearest", "bilinear"),
-                    alpha=0.45,
-                    cmap="jet",
-                    shift_x=0.0,
-                    shift_y=0.0,
-                    patch_grow_pct=300.0,
-                    grow_mode="mean",
-                )
+                # si on veut overlay mais pas de heatmaps -> skip overlay
+                img = None
+                if (need_overlay and hm) or need_circle:
+                    img = pil_from_base64(r.base64)
 
-                # 3) Draw circle on max patch
-                soft = hm["soft_topk"]["heat_2d"]
-                if soft is not None:
-                    img_marked = draw_circle_on_max_patch(
+                # --- overlays ---
+                if need_overlay and hm:
+                    meta["heatmap_overlays_base64"] = build_heatmap_overlays_base64(
                         img=img,
-                        heat_2d=soft
+                        heatmaps=hm,
+                        interps=("nearest", "bilinear"),
+                        alpha=0.45,
+                        cmap="jet",
+                        shift_x=0.0,
+                        shift_y=0.0,
+                        patch_grow_pct=300.0,
+                        grow_mode="mean",
                     )
-                    meta["soft_topk_max_patch_circle_base64"] = img_marked
+
+                # --- circle (from soft_topk heatmap) ---
+                if need_circle:
+                    soft = (hm.get("soft_topk") or {}).get("heat_2d")
+                    if soft is not None:
+                        img_marked = draw_circle_on_max_patch(img=img, heat_2d=soft)
+                        meta["soft_topk_max_patch_circle_base64"] = pil_to_base64_png(img_marked)
+
                 r.metadata = meta
         return results
 
