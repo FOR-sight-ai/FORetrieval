@@ -35,12 +35,14 @@ dependencies = [
     "torch>=2.7.1",
     "transformers>=4.42.0",
     "pdf2image>=1.17.0",
+    "docling>=2.76.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.4.0", "ruff>=0.1.9"]
 server = ["uvicorn", "fastapi"]
 langchain = ["langchain-core"]
+docling = ["docling>=2.76.0"]
 extra_converters = [
     "docx2pdf>=0.1.8; sys_platform == \"win32\"",
     "reportlab>=4.4.4",

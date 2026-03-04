@@ -43,6 +43,7 @@ class MultiModalRetrieverModel:
         cls,
         pretrained_model_name_or_path: Union[str, Path],
         index_root: str = ".rag_index",
+        ingestion: Dict[str, Any] = {"backend": "default"},
         device: str = "cuda",
         verbose: int = 1,
     ):
@@ -50,7 +51,10 @@ class MultiModalRetrieverModel:
 
         Parameters:
             pretrained_model_name_or_path (str): Local path or huggingface model name.
+            index_root (str): The root directory where indexes will be stored. Default is ".rag_index".
+            ingestion (Dict[str, Any]): Ingestion configuration for the model. Default is {"backend ": "default"}.
             device (str): The device to load the model on. Default is "cuda".
+            verbose (int): Verbosity level. Default is 1.
 
         Returns:
             cls (RAGMultiModalModel): The current instance of RAGMultiModalModel, with the model initialised.
@@ -59,6 +63,7 @@ class MultiModalRetrieverModel:
         instance.model = ColPaliModel.from_pretrained(
             pretrained_model_name_or_path,
             index_root=index_root,
+            ingestion=ingestion,
             device=device,
             verbose=verbose,
         )

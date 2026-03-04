@@ -16,6 +16,7 @@ from .plot_utils import (
     majority_token_id,
     build_heatmap_overlays_base64
 )
+from .docling_ingest import chunk_pdf_to_images
 import srsly
 import torch
 from colpali_engine.models import (
@@ -50,6 +51,7 @@ class ColPaliModel:
         load_from_index: bool = False,
         index_root: str = ".foretrieval",
         device: Optional[Union[str, torch.device]] = None,
+        ingestion: Dict[str, Any] = {"backend": "default"},
         **kwargs,
     ):
         if isinstance(pretrained_model_name_or_path, Path):
@@ -69,6 +71,11 @@ class ColPaliModel:
             )
 
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
+        self.ingestion = ingestion
+        self.ingestion_backend = (self.ingestion.get("backend") or "default").lower()
+        if self.ingestion_backend == "docling":
+            self.docling_cfg = self.ingestion.get("docling_cfg", {})
+
         self.model_name = self.pretrained_model_name_or_path
         self.n_gpu = torch.cuda.device_count() if n_gpu == -1 else n_gpu
         device = device or (
@@ -79,6 +86,10 @@ class ColPaliModel:
             else "cpu"
         )
         self.index_name = index_name
+        if self.index_name is not None and self.ingestion_backend == "docling":
+            self.docling_dir = Path(index_root) / self.index_name / "docling_chunks"
+            out_dir = Path(self.docling_dir)
+            out_dir.mkdir(parents=True, exist_ok=True)
         self.verbose = verbose
         self.load_from_index = load_from_index
         self.index_root = index_root
@@ -280,6 +291,7 @@ class ColPaliModel:
     def from_pretrained(
         cls,
         pretrained_model_name_or_path: Union[str, Path],
+        ingestion: Dict[str, Any] = {"backend": "default"},
         n_gpu: int = -1,
         verbose: int = 1,
         device: Optional[Union[str, torch.device]] = None,
@@ -288,6 +300,7 @@ class ColPaliModel:
     ):
         return cls(
             pretrained_model_name_or_path=pretrained_model_name_or_path,
+            ingestion=ingestion,
             n_gpu=n_gpu,
             verbose=verbose,
             load_from_index=False,
@@ -780,7 +793,46 @@ class ColPaliModel:
         """
         if isinstance(item, Path):
             ext = item.suffix.lower()
-            if ext == ".pdf":
+
+            # 0) docling chunks (si activé)
+            if self.ingestion_backend == "docling":
+                # TODO ajout de la conversion en PDF
+                images = chunk_pdf_to_images(item, cfg=self.docling_cfg)
+                if images:
+                    # 1) sauver les chunks à plat (pointer_based friendly)
+                    if self.docling_dir is None:
+                        assert self.index_name is not None, "index_name must be set to use docling ingestion"
+                        self.docling_dir = Path(self.index_root) / self.index_name / "docling_chunks"
+                        self.docling_dir.mkdir(parents=True, exist_ok=True)
+
+                    chunk_paths = []
+                    for chunk_id, img in enumerate(images, start=1):
+                        p = self.docling_dir / f"{int(doc_id)}_chunk_{chunk_id:04d}.png"
+                        img.save(p, format="PNG")
+                        chunk_paths.append(p)
+
+                    # 2) indexer (page_id = chunk_id)
+                    page_ids = list(range(1, len(images) + 1))
+                    self._add_to_index(
+                        images,
+                        store_collection_with_index,
+                        doc_id,
+                        page_ids=page_ids,
+                        metadata=metadata,
+                    )
+
+                    # 3) canonical path: on garde le doc source pour remonter au document
+                    return item.resolve()
+                # si docling échoue => fallback default en dessous
+            
+            # 1) images disque : pas docling
+            elif ext in [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif"]:
+                image = Image.open(item)
+                self._add_to_index(image, store_collection_with_index, doc_id, metadata=metadata)
+                return item.resolve()  # <--- disk image path
+
+            # 2) default (code existant) : pdf / convert_to_pdf / pdf2image
+            elif ext == ".pdf":
                 pdf_file = item.resolve()
 
                 with tempfile.TemporaryDirectory() as path:
@@ -805,14 +857,7 @@ class ColPaliModel:
                             metadata=metadata,
                         )
                 return pdf_file
-
-            elif ext in [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif"]:
-                image = Image.open(item)
-                self._add_to_index(
-                    image, store_collection_with_index, doc_id, metadata=metadata
-                )
-                return item.resolve()  # <--- disk image path
-
+            # Si c'est une image, on l'indexe directement sans conversion (ne passe pas par Docling)
             else:
                 # 1) if a valid twin PDF already exists → use it
                 existing_pdf = self._find_existing_pdf(item)
@@ -1275,6 +1320,22 @@ class ColPaliModel:
             return result  # rien à faire
 
         path = Path(file_name)
+
+        # --- NEW: DOCling chunk images (saved next to the index) ---
+        if self.ingestion_backend == "docling":
+            try:
+                # chunk_id = page_num
+                chunk_png = self.docling_dir / f"{int(doc_id)}_chunk_{chunk_id:04d}.png"
+                if chunk_png.exists():
+                    image = Image.open(chunk_png)
+                    result.base64 = self._post_process_image(image)
+                    return result
+                # si pas trouvé: fallback au comportement existant (pdf/image)
+            except Exception as e:
+                if self.verbose > 0:
+                    print(f"[fetch_result_img] Docling chunk fetch error: {e}")
+                # fallback
+                
         ext = path.suffix.lower()
 
         try:
