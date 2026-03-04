@@ -848,9 +848,7 @@ class ColPaliModel:
                 return Path(pdf_file).resolve()
 
         elif isinstance(item, Image.Image):
-            self._add_to_index(
-                item, store_collection_with_index, doc_id, metadata=metadata
-            )
+            self._add_to_index(item, store_collection_with_index, doc_id, metadata=metadata)
             return None  # in-memory
         else:
             raise ValueError(f"Unsupported input type: {type(item)}")
@@ -900,9 +898,7 @@ class ColPaliModel:
 
         # Validate input lengths
         if len(images) != len(page_ids):
-            raise ValueError(
-                f"Number of images ({len(images)}) does not match number of page_ids ({len(page_ids)})"
-            )
+            raise ValueError(f"Number of images ({len(images)}) does not match number of page_ids ({len(page_ids)})")
 
         # Check for existing entries
         for page_id in page_ids:
@@ -910,9 +906,7 @@ class ColPaliModel:
                 entry["doc_id"] == doc_id and entry["page_id"] == page_id
                 for entry in self.embed_id_to_doc_id.values()
             ):
-                raise ValueError(
-                    f"Document ID {doc_id} with page ID {page_id} already exists in the index"
-                )
+                raise ValueError(f"Document ID {doc_id} with page ID {page_id} already exists in the index")
 
         # Process images in batches
         processed_images = self.processor.process_images(images)
@@ -1041,6 +1035,12 @@ class ColPaliModel:
             }
             embeddings_query = self.model(**batch_query)
             qs = list(torch.unbind(embeddings_query.to("cpu")))
+
+        # Filtrage des tokens de la requête (endoftext)
+        input_ids = batch_query["input_ids"][0].detach().cpu().tolist()
+        tokens = self.processor.tokenizer.convert_ids_to_tokens(input_ids)
+        valid_idxs = [i for i, tok in enumerate(tokens) if tok not in {"<|endoftext|>", "Query", ":"}] # Ajout d'un filtre sur certains tokens
+        qs = [qs[0][valid_idxs]]
 
         if filter_metadata:
             req_embeddings, req_embedding_ids = self.filter_embeddings(filter_metadata)
