@@ -86,6 +86,7 @@ class ColPaliModel:
             else "cpu"
         )
         self.index_name = index_name
+        self.docling_dir = None
         if self.index_name is not None and self.ingestion_backend == "docling":
             self.docling_dir = Path(index_root) / self.index_name / "docling_chunks"
             out_dir = Path(self.docling_dir)
@@ -796,34 +797,48 @@ class ColPaliModel:
 
             # 0) docling chunks (si activé)
             if self.ingestion_backend == "docling":
-                # TODO ajout de la conversion en PDF
-                images = chunk_pdf_to_images(item, cfg=self.docling_cfg)
-                if images:
-                    # 1) sauver les chunks à plat (pointer_based friendly)
-                    if self.docling_dir is None:
-                        assert self.index_name is not None, "index_name must be set to use docling ingestion"
-                        self.docling_dir = Path(self.index_root) / self.index_name / "docling_chunks"
-                        self.docling_dir.mkdir(parents=True, exist_ok=True)
+                
+                # 0) Convertir en PDF si ce n'est pas déjà un PDF (ou un miroir de PDF)
+                if ext == ".pdf":
+                    pdf_file = item.resolve()
+                else:
+                    existing_pdf = self._find_existing_pdf(item)
+                    if existing_pdf is not None:
+                        pdf_file = existing_pdf
+                    else:
+                        # 2) otherwise convert it
+                        pdf_file = _convert_to_pdf(item)
+                        if pdf_file is None:
+                            logger.warning(f"Docling ingestion: failed to convert {item} to PDF. Skipping.")
+                            return None  # skip
 
-                    chunk_paths = []
-                    for chunk_id, img in enumerate(images, start=1):
-                        p = self.docling_dir / f"{int(doc_id)}_chunk_{chunk_id:04d}.png"
-                        img.save(p, format="PNG")
-                        chunk_paths.append(p)
+                # 1) Sauvegarder les chunks Docling sur disque
+                if self.docling_dir is None:
+                    assert self.index_name is not None, "index_name must be set to use docling ingestion"
+                    self.docling_dir = Path(self.index_root) / self.index_name / "docling_chunks"
+                    self.docling_dir.mkdir(parents=True, exist_ok=True)
+                chunks = chunk_pdf_to_images(pdf_file, output_dir=self.docling_dir)
 
-                    # 2) indexer (page_id = chunk_id)
-                    page_ids = list(range(1, len(images) + 1))
+                # 2) indexer
+                for i in range(0, len(chunks), batch_size):
+                    batch_chunks, batch_page_ids, batch_chunk_ids = [], [], []
+                    for j in range(i, min(i + batch_size, len(chunks))):
+                        ch = chunks[j]
+                        image = Image.open(ch.path)
+                        batch_chunks.append(image)
+                        batch_page_ids.append(ch.page_id)
+                        batch_chunk_ids.append(ch.elem_id)
                     self._add_to_index(
-                        images,
+                        batch_chunks,
                         store_collection_with_index,
                         doc_id,
-                        page_ids=page_ids,
+                        page_ids=batch_page_ids,
+                        chunk_ids=batch_chunk_ids,
                         metadata=metadata,
                     )
 
-                    # 3) canonical path: on garde le doc source pour remonter au document
-                    return item.resolve()
-                # si docling échoue => fallback default en dessous
+                return Path(pdf_file).resolve()
+            # si docling échoue => fallback default en dessous
             
             # 1) images disque : pas docling
             elif ext in [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif"]:
@@ -931,6 +946,7 @@ class ColPaliModel:
         store_collection_with_index: bool,
         doc_id: Union[str, int],
         page_ids: Union[int, List[int]] = 1,
+        chunk_ids: Optional[Union[int, List[int]]] = None,
         metadata: Optional[Dict[str, Union[str, int]]] = None,
     ):
         # Convert single image to list for uniform processing
@@ -940,18 +956,36 @@ class ColPaliModel:
         # Convert single page_id to list for uniform processing
         if isinstance(page_ids, int):
             page_ids = [page_ids]
+    
+        # Convert chunk_ids to list if needed
+        if chunk_ids is None:
+            chunk_ids = [None] * len(images)
+        elif isinstance(chunk_ids, int):
+            chunk_ids = [chunk_ids]
 
         # Validate input lengths
         if len(images) != len(page_ids):
             raise ValueError(f"Number of images ({len(images)}) does not match number of page_ids ({len(page_ids)})")
+        if len(images) != len(chunk_ids):
+            raise ValueError(f"Number of images ({len(images)}) does not match number of chunk_ids ({len(chunk_ids)})")
 
-        # Check for existing entries
-        for page_id in page_ids:
-            if any(
-                entry["doc_id"] == doc_id and entry["page_id"] == page_id
-                for entry in self.embed_id_to_doc_id.values()
-            ):
-                raise ValueError(f"Document ID {doc_id} with page ID {page_id} already exists in the index")
+        # Check for existing entries (by chunk if exist (docling) or page)
+        if any(c is not None for c in chunk_ids):
+            for chunk_id in chunk_ids:
+                if chunk_id is None:
+                    continue
+                if any(
+                    entry["doc_id"] == doc_id and entry.get("chunk_id") == chunk_id
+                    for entry in self.embed_id_to_doc_id.values()
+                ):
+                    raise ValueError(f"Document ID {doc_id} with chunk ID {chunk_id} already exists in the index")
+        else:
+            for page_id in page_ids:
+                if any(
+                    entry["doc_id"] == doc_id and entry["page_id"] == page_id
+                    for entry in self.embed_id_to_doc_id.values()
+                ):
+                    raise ValueError(f"Document ID {doc_id} with page ID {page_id} already exists in the index")
 
         # Process images in batches
         processed_images = self.processor.process_images(images)
@@ -977,13 +1011,16 @@ class ColPaliModel:
 
         # Add to index
         embeddings_list = list(torch.unbind(embeddings.to("cpu")))
-        for i, (embedding, page_id) in enumerate(zip(embeddings_list, page_ids)):
+        for i, (embedding, page_id, chunk_id) in enumerate(zip(embeddings_list, page_ids, chunk_ids)):
             embed_id = len(self.indexed_embeddings)
             self.indexed_embeddings.append(embedding)
-            self.embed_id_to_doc_id[embed_id] = {
+            entry = {
                 "doc_id": doc_id,
-                "page_id": int(page_id),
+                "page_id": int(page_id)
             }
+            if chunk_id is not None:
+                entry["chunk_id"] = int(chunk_id)
+            self.embed_id_to_doc_id[embed_id] = entry
 
             # --- NEW: stocker le mapping tokens image / grille ---
             self.embed_id_to_extra[embed_id] = {
@@ -1010,7 +1047,9 @@ class ColPaliModel:
             self.doc_id_to_metadata[int(doc_id)] = DocMetadata(**metadata).as_jsonable()
 
         if self.verbose > 0:
-            print(f"Added {len(images)} pages of document {doc_id} to index.")
+            n = len(images)
+            unit = "chunks" if any(c is not None for c in chunk_ids) else "pages"
+            print(f"Added {n} {unit} of document {doc_id} to index.")
 
     def remove_from_index(self):
         raise NotImplementedError("This method is not implemented yet.")
@@ -1104,6 +1143,7 @@ class ColPaliModel:
             result = Result(
                 doc_id=doc_info["doc_id"],
                 page_num=int(doc_info["page_id"]),
+                chunk_num=int(doc_info["chunk_id"]) if doc_info.get("chunk_id") is not None else None,
                 score=float(scores[0][embed_id]),
                 metadata=self.doc_id_to_metadata.get(int(doc_info["doc_id"]), {}),
                 base64=self.collection.get(adjusted_embed_id) if return_base64_results else None,
@@ -1324,18 +1364,21 @@ class ColPaliModel:
         # --- NEW: DOCling chunk images (saved next to the index) ---
         if self.ingestion_backend == "docling":
             try:
-                # chunk_id = page_num
-                chunk_png = self.docling_dir / f"{int(doc_id)}_chunk_{chunk_id:04d}.png"
-                if chunk_png.exists():
-                    image = Image.open(chunk_png)
-                    result.base64 = self._post_process_image(image)
-                    return result
+                if self.docling_dir is None:
+                    assert self.index_name is not None, "index_name must be set to use docling ingestion"
+                    self.docling_dir = Path(self.index_root) / self.index_name / "docling_chunks"
+                    self.docling_dir.mkdir(parents=True, exist_ok=True)
+                assert result.chunk_num is not None, f"Result.chunk_num must be defined"
+                path_chunk = Path(self.docling_dir) / f"{path.stem}_p{result.page_num}_{result.chunk_num}.png"
+                assert path_chunk.exists(), f"Path {path_chunk} for chunk {result.chunk_num} does not exists"
+                image = Image.open(path_chunk)
+                result.base64 = self._post_process_image(image)
+                return result
                 # si pas trouvé: fallback au comportement existant (pdf/image)
             except Exception as e:
                 if self.verbose > 0:
-                    print(f"[fetch_result_img] Docling chunk fetch error: {e}")
-                # fallback
-                
+                    logger.warning(f"[fetch_result_img] Docling chunk fetch error: {e}")
+
         ext = path.suffix.lower()
 
         try:

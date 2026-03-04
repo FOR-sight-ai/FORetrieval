@@ -373,7 +373,7 @@ def chunk_pdf_to_images(pdf_path: str, output_dir: str, scale: float = 2.0, max_
         seen_fps.add(fp)
 
         elem_id += 1
-        out_path = out_images_dir / f"{doc_stem}_p{it.page_no:03d}_{elem_id:06d}.png"
+        out_path = out_images_dir / f"{doc_stem}_p{it.page_no}_{elem_id}.png"
         it.img.save(out_path)
 
         out_items.append(ExportedImg(
