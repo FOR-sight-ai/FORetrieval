@@ -53,7 +53,10 @@ extra_converters = [
 
 [tool.pytest.ini_options]
 filterwarnings = ["ignore::Warning"]
-markers = ["slow: marks test as slow"]
+markers = [
+    "slow: marks test as slow (GPU-dependent or expensive)",
+    "integration: marks test as requiring a live API key",
+]
 testpaths = ["tests"]
 
 [tool.ruff]
