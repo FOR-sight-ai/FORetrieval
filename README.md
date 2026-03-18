@@ -63,11 +63,11 @@ pytest tests/test_metadata_no_ai.py
 
 ### Metadata tests (with AI)
 
-Tests for AI-backed metadata generation (`ai_metadata_provider_factory(ai_cfg)`).  
+Tests for AI-backed metadata generation .  
 Set at least one of the following environment variables before running:
 
 ```bash
-export OPENROUTER_API_KEY=...   # preferred — fast, high rate limits
+export OPENROUTER_API_KEY=...   
 export OPENAI_API_KEY=...
 export MISTRAL_API_KEY=...
 export OLLAMA_HOST=http://localhost:11434   # + optionally OLLAMA_MODEL (default: mistral-small-latest)
