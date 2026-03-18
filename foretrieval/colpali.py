@@ -611,7 +611,12 @@ class ColPaliModel:
             self.highest_doc_id = -1
 
         if input_path.is_dir():
-            items = list(input_path.iterdir())
+            # Sort by filename so the ordering is deterministic and consistent
+            # with build_metadata_list_for_dir(), which also sorts by p.name.
+            # Without this, two independent iterdir() calls on the same
+            # directory can return different orderings, silently misaligning
+            # a metadata list with the wrong documents.
+            items = sorted(input_path.iterdir(), key=lambda p: p.name)
             if doc_ids is not None and len(doc_ids) != len(items):
                 raise ValueError(
                     f"Number of doc_ids ({len(doc_ids)}) does not match number of documents ({len(items)})"
