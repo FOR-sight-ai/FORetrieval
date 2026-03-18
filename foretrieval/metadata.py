@@ -205,17 +205,19 @@ def _build_model_from_cfg(ai_cfg: Dict[str, Any]):
                 'Install: pip install "pydantic-ai-slim[mistral]"\n'
                 'or: pip install "pydantic-ai[mistral]"'
             )
-        # Mistral defaults
-        base_url = base_url or "https://api.mistral.ai/v1"
         api_key = api_key or os.getenv("MISTRAL_API_KEY")
         if not name:
-            # Reasonable default choice
             name = "mistral-small-latest"
 
-        provider = MistralProvider(
-            api_key=api_key,
-            base_url=base_url,
-        )
+        # Do not pass base_url when it is not explicitly overridden — the
+        # MistralProvider SDK derives the correct endpoint internally.
+        # Passing "https://api.mistral.ai/v1" causes the SDK to produce
+        # double-path URLs (e.g. /v1/v1/...) resulting in HTTP 404.
+        provider_kwargs: dict = {"api_key": api_key}
+        if base_url:
+            provider_kwargs["base_url"] = base_url
+
+        provider = MistralProvider(**provider_kwargs)
         return MistralModel(name, provider=provider)
 
     elif provider_raw == "openrouter":
@@ -385,7 +387,6 @@ def ai_metadata_provider_factory(
         md["tags"] = ai.tags or []
         md["document_type"] = ai.document_type
         md["short_description"] = ai.short_description
-        print("result", md)
         return md
 
     return _provider

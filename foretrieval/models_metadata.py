@@ -96,7 +96,24 @@ class MetadataFilter(BaseModel):
 def build_metadata_list_for_dir(
     input_dir: Path, provider: Callable[[Path], Dict[str, Any]]
 ) -> List[Optional[DocMetadata]]:
-    items = list(input_dir.iterdir())
+    """Build a metadata list for every entry in ``input_dir``.
+
+    The list is sorted by filename (``p.name``) so that its order matches
+    the sorted iteration used by ``ColPaliModel.index()`` when it receives a
+    directory path.  Using an unsorted ``iterdir()`` in both places could
+    produce a different ordering between two independent calls on the same
+    directory, silently misaligning metadata with the wrong documents.
+
+    Args:
+        input_dir: Directory whose contents will be enumerated.
+        provider: Callable that receives a ``Path`` and returns a metadata
+            dict compatible with ``DocMetadata``.
+
+    Returns:
+        A list aligned with ``sorted(input_dir.iterdir(), key=lambda p: p.name)``.
+        Files produce ``DocMetadata`` instances; sub-directories produce ``None``.
+    """
+    items = sorted(input_dir.iterdir(), key=lambda p: p.name)
     md_list: List[Optional[DocMetadata]] = []
     for p in items:
         if p.is_file():
