@@ -1,5 +1,7 @@
-from typing import Any, Dict, List, Optional
+import re
 from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 from .models_metadata import MetadataFilter
 
 
@@ -72,8 +74,17 @@ def _value_match(meta: Dict[str, Any], f: MetadataFilter) -> bool:
                     break
             checks.append(ok)
 
+    if f.regex is not None:
+        for field, pattern in f.regex.items():
+            mv = str(meta.get(field) or "")
+            try:
+                checks.append(bool(re.search(pattern, mv, re.IGNORECASE)))
+            except re.error:
+                # Malformed pattern — treat as no match rather than crashing
+                checks.append(False)
+
     for k, v in f.__dict__.items():
-        if k in {"language", "ext", "tags", "document_type", "mtime", "logic"}:
+        if k in {"language", "ext", "tags", "document_type", "mtime", "logic", "regex"}:
             continue
         if v is None:
             continue

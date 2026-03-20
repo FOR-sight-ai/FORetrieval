@@ -51,6 +51,11 @@ extra_converters = [
 [project.urls]
 "Homepage" = "https://github.com/FOR-sight-ai/FORetrieval"
 
+[dependency-groups]
+dev = [
+    "matplotlib>=3.10.8",
+]
+
 [tool.pytest.ini_options]
 filterwarnings = ["ignore::Warning"]
 markers = [

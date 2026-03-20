@@ -985,7 +985,7 @@ class ColPaliModel:
 
         req_doc_ids = []
         for did, md in self.doc_id_to_metadata.items():
-            # md est stocké en dict JSONable -> parse léger
+            # md is stored as a JSONable dict
             if _value_match(md, f):
                 req_doc_ids.append(int(did))
 
@@ -1041,14 +1041,19 @@ class ColPaliModel:
             embeddings_query = self.model(**batch_query)
             qs = list(torch.unbind(embeddings_query.to("cpu")))
 
-        # Filtrage des tokens de la requête (endoftext)
+        # Filter query tokens (remove end-of-text and structural tokens)
         input_ids = batch_query["input_ids"][0].detach().cpu().tolist()
         tokens = self.processor.tokenizer.convert_ids_to_tokens(input_ids)
-        valid_idxs = [i for i, tok in enumerate(tokens) if tok not in {"<|endoftext|>", "Query", ":"}] # Ajout d'un filtre sur certains tokens
+        valid_idxs = [i for i, tok in enumerate(tokens) if tok not in {"<|endoftext|>", "Query", ":"}]
         qs = [qs[0][valid_idxs]]
 
         if filter_metadata:
             req_embeddings, req_embedding_ids = self.filter_embeddings(filter_metadata)
+            if not req_embeddings:
+                logger.warning(
+                    "Metadata filter matched no documents — returning empty results."
+                )
+                return []
         else:
             req_embeddings = self.indexed_embeddings
             req_embedding_ids = list(range(len(self.indexed_embeddings)))
