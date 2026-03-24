@@ -8,6 +8,8 @@ class Result(BaseModel):
     """The unique identifier for the document."""
     page_num: int
     """The page number within the document."""
+    chunk_num: Optional[int] = None
+    """The page number within the document."""
     score: Optional[float] = None
     """The relevance score of the document."""
     metadata: Optional[dict] = None
@@ -19,6 +21,7 @@ class Result(BaseModel):
         return {
             "doc_id": self.doc_id,
             "page_num": self.page_num,
+            "chunk_num": self.chunk_num,
             "score": self.score,
             "metadata": self.metadata,
             "base64": self.base64,

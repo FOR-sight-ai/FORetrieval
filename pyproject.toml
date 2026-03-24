@@ -38,6 +38,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Qdrant vector-store backend (recommended for large indexes)
+qdrant = ["qdrant-client>=1.17.1"]
+# Docling-based PDF chunking ingestion pipeline
+docling = ["docling>=2.76.0"]
 dev = ["pytest>=7.4.0", "ruff>=0.1.9"]
 server = ["uvicorn", "fastapi"]
 langchain = ["langchain-core"]

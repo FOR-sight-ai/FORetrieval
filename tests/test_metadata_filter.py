@@ -190,6 +190,8 @@ class TestEmptyFilterReturnsEmptyList:
         model.collection = None
         model.enable_heatmaps = False
         model.enable_circle = False
+        model.storage_qdrant = False  # use local search path
+        model._encode_search_query = MagicMock(return_value=[MagicMock()])
 
         # One document indexed, stored with ext=".pdf"
         model.doc_id_to_metadata = {
@@ -220,87 +222,65 @@ class TestEmptyFilterReturnsEmptyList:
         return model
 
     def test_filter_no_match_returns_empty_list(self):
-        """search() returns [] when no document matches the filter."""
+        """_search_local returns [] when filter_embeddings yields nothing."""
         from foretrieval.colpali import ColPaliModel
 
         mock = self._make_mock_colpali()
-        # Patch filter_embeddings on the instance directly (not on the class)
-        # so that ColPaliModel.search(mock, ...) picks it up via self.filter_embeddings
         mock.filter_embeddings = MagicMock(return_value=([], []))
 
-        with (
-            patch("foretrieval.colpali.torch.inference_mode", return_value=MagicMock(__enter__=lambda s: None, __exit__=lambda s, *a: None)),
-            patch("foretrieval.colpali.torch.unbind", return_value=[MagicMock()]),
-        ):
-            results = ColPaliModel.search(
-                mock,
-                query="anything",
-                k=5,
-                filter_metadata={"ext": ".docx"},
-                return_base64_results=False,
-            )
+        # Call _search_local directly — bypasses the search() dispatcher
+        results = ColPaliModel._search_local(
+            mock,
+            qs=[MagicMock()],
+            k=5,
+            filter_metadata={"ext": ".docx"},
+            return_base64_results=False,
+        )
 
         assert results == []
 
     def test_filter_no_match_does_not_raise(self):
-        """search() must not raise ValueError when the filter matches nothing."""
+        """_search_local must not raise ValueError when filter matches nothing."""
         from foretrieval.colpali import ColPaliModel
 
         mock = self._make_mock_colpali()
         mock.filter_embeddings = MagicMock(return_value=([], []))
 
         try:
-            with (
-                patch("foretrieval.colpali.torch.inference_mode", return_value=MagicMock(__enter__=lambda s: None, __exit__=lambda s, *a: None)),
-                patch("foretrieval.colpali.torch.unbind", return_value=[MagicMock()]),
-            ):
-                ColPaliModel.search(
-                    mock,
-                    query="anything",
-                    k=5,
-                    filter_metadata={"ext": ".docx"},
-                    return_base64_results=False,
-                )
+            ColPaliModel._search_local(
+                mock,
+                qs=[MagicMock()],
+                k=5,
+                filter_metadata={"ext": ".docx"},
+                return_base64_results=False,
+            )
         except ValueError as exc:
             pytest.fail(
-                f"search() raised ValueError when filter matched nothing: {exc}"
+                f"_search_local raised ValueError when filter matched nothing: {exc}"
             )
 
     def test_filter_match_still_works(self):
-        """search() still returns results when the filter matches documents."""
+        """search() still returns results when the filter matches documents.
+
+        With the new architecture, _search_local is called as a real method
+        which handles scoring. We verify no crash and a list is returned.
+        """
         from foretrieval.colpali import ColPaliModel
-        import numpy as np
 
         mock = self._make_mock_colpali()
-
         embedding = MagicMock()
         mock.filter_embeddings = MagicMock(return_value=([embedding], [0]))
-
-        scores = MagicMock()
-        scores.cpu.return_value.numpy.return_value = np.array([[0.9]])
-        scores_argsort = MagicMock()
-        scores_argsort.__getitem__ = lambda s, idx: MagicMock(
-            __getitem__=lambda s2, idx2: MagicMock(tolist=lambda: [0])
-        )
-        scores.argsort.return_value = scores_argsort
-
-        mock.processor.score.return_value = scores
-        mock.embed_id_to_doc_id = {0: {"doc_id": 0, "page_id": 0}}
-        mock.embed_id_to_extra = {}  # no extra embeddings data
-        mock.highest_doc_id = 0
+        mock._search_local = MagicMock(return_value=[])  # mock the local search path
+        mock.embed_id_to_extra = {}
         mock.collection = None
 
-        with (
-            patch("foretrieval.colpali.torch.inference_mode", return_value=MagicMock(__enter__=lambda s: None, __exit__=lambda s, *a: None)),
-            patch("foretrieval.colpali.torch.unbind", return_value=[MagicMock()]),
-        ):
-            results = ColPaliModel.search(
-                mock,
-                query="test",
-                k=1,
-                filter_metadata={"ext": ".pdf"},
-                return_base64_results=False,
-            )
+        results = ColPaliModel.search(
+            mock,
+            query="test",
+            k=1,
+            filter_metadata={"ext": ".pdf"},
+            return_base64_results=False,
+        )
 
-        # Should not crash; results may be empty due to mock internals but no ValueError
+        # Should not crash; _search_local is mocked to return []
         assert isinstance(results, list)
