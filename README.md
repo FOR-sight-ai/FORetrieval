@@ -4,7 +4,7 @@ FORetrieval is a multimodal document retrieval library built on top of [colpali-
 
 Key features:
 
-- **Two storage backends** — local file-based (`.pt` files) or Qdrant embedded vector store
+- **Two storage backends** — local file-based (Colpali legacy `.pt` files) or Qdrant embedded vector store (default)
 - **Metadata generation** — filesystem metadata always; AI-generated tags, language detection, and short descriptions optionally
 - **Metadata filtering** — filter the retrieval pool by `ext`, `mtime`, `language`, `tags`, `document_type`, or arbitrary regex patterns before scoring
 - **Docling ingestion** — optional semantic PDF chunking using [Docling](https://github.com/DS4SD/docling), producing image chunks aligned with document structure
@@ -13,11 +13,11 @@ Key features:
 ## Installation
 
 ```bash
-pip install foretrieval
+uv sync
 
 # Optional extras:
-pip install "foretrieval[qdrant]"    # Qdrant storage backend (recommended for large indexes)
-pip install "foretrieval[docling]"   # Docling-based PDF chunking
+uv sync --extra qdrant    # Qdrant storage backend (recommended for large indexes)
+uv sync --extra docling   # Docling-based PDF chunking
 ```
 
 ## Pre-requisites
@@ -25,11 +25,6 @@ pip install "foretrieval[docling]"   # Docling-based PDF chunking
 ### Poppler
 
 Required by `pdf2image` for PDF-to-image conversion:
-
-**macOS**
-```bash
-brew install poppler
-```
 
 **Debian / Ubuntu**
 ```bash
@@ -41,7 +36,7 @@ sudo apt-get install -y poppler-utils
 Speeds up ColQwen2 / Gemma-based models significantly:
 
 ```bash
-pip install flash-attn
+uv pip install flash-attn
 ```
 
 ### Hardware
@@ -205,10 +200,6 @@ When the filter matches no documents, `search()` returns an empty list `[]` with
 
 FORetrieval optionally uses [Docling](https://github.com/DS4SD/docling) to convert PDFs into semantically meaningful image chunks rather than whole pages. Each chunk corresponds to a coherent region of text and associated figures.
 
-```bash
-pip install "foretrieval[docling]"
-```
-
 ```python
 model = MultiModalRetrieverModel.from_pretrained(
     "vidore/colqwen2.5-v0.2",
@@ -225,8 +216,6 @@ Results include a `chunk_num` field identifying the exact Docling chunk within t
 Install the dev dependencies first:
 
 ```bash
-pip install -e ".[dev]"
-# or with uv:
 uv sync --extra dev
 ```
 
@@ -249,7 +238,7 @@ pytest tests/test_metadata_no_ai.py
 Set at least one API key:
 
 ```bash
-export OPENROUTER_API_KEY=...   # preferred
+export OPENROUTER_API_KEY=...
 export OPENAI_API_KEY=...
 export MISTRAL_API_KEY=...
 export OLLAMA_HOST=http://localhost:11434   # + optionally OLLAMA_MODEL (default: mistral-small-latest)
