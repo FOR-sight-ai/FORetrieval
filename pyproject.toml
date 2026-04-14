@@ -27,6 +27,7 @@ dependencies = [
     "colpali-engine>=0.3.4,<0.4.0",
     "docx2pdf>=0.1.8",
     "langdetect>=1.0.9",
+    "matplotlib>=3.8.0",
     "ml-dtypes",
     "pydantic-ai>=1.4.0",
     "pydantic-ai-slim[openai]>=1.8.0",
@@ -43,6 +44,8 @@ qdrant = ["qdrant-client>=1.17.1"]
 # Docling-based PDF chunking ingestion pipeline
 docling = ["docling>=2.76.0"]
 dev = ["pytest>=7.4.0", "ruff>=0.1.9"]
+server = ["uvicorn", "fastapi"]
+quant = ["bitsandbytes>=0.43"]
 langchain = ["langchain-core"]
 extra_converters = [
     "docx2pdf>=0.1.8; sys_platform == \"win32\"",

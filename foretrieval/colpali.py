@@ -1,4 +1,5 @@
 import base64
+import importlib.util
 import io
 import logging
 import os
@@ -13,6 +14,7 @@ from colpali_engine.models import ColPali, ColPaliProcessor, ColQwen2, ColQwen2_
 from pdf2image import convert_from_path
 from PIL import Image
 import torch
+from transformers import BitsAndBytesConfig
 
 try:
     from qdrant_client import QdrantClient
@@ -126,6 +128,43 @@ class ColPaliModel:
         self.qdrant_collection = index_name
         self.qdrant_path = None
 
+        load_in_4bit = bool(kwargs.pop("load_in_4bit", False))
+        load_in_8bit = bool(kwargs.pop("load_in_8bit", False))
+        bnb_4bit_quant_type = str(kwargs.pop("bnb_4bit_quant_type", "nf4"))
+        bnb_4bit_compute_dtype = str(kwargs.pop("bnb_4bit_compute_dtype", "float16"))
+
+        if load_in_4bit and load_in_8bit:
+            raise ValueError("Only one quantization mode can be enabled: 4-bit or 8-bit.")
+
+        quantization_config = None
+        if load_in_4bit or load_in_8bit:
+            if importlib.util.find_spec("bitsandbytes") is None:
+                raise ImportError(
+                    "Quantization requested but `bitsandbytes` is not installed. "
+                    "Install it with `pip install bitsandbytes`."
+                )
+            if load_in_4bit:
+                compute_dtype_map = {
+                    "float16": torch.float16,
+                    "bfloat16": torch.bfloat16,
+                    "float32": torch.float32,
+                }
+                if bnb_4bit_compute_dtype not in compute_dtype_map:
+                    raise ValueError(
+                        "Invalid bnb_4bit_compute_dtype. Expected one of: "
+                        "'float16', 'bfloat16', 'float32'."
+                    )
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type=bnb_4bit_quant_type,
+                    bnb_4bit_compute_dtype=compute_dtype_map[bnb_4bit_compute_dtype],
+                )
+            else:
+                quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+        self._load_in_4bit = load_in_4bit
+        self._load_in_8bit = load_in_8bit
+        self._quantization_config = quantization_config
+
         if self.storage_qdrant and self.index_name is not None:
             self.qdrant_path = Path(self.index_root) / self.index_name / "qdrant"
             self.qdrant_client = QdrantClient(path=str(self.qdrant_path))
@@ -165,6 +204,7 @@ class ColPaliModel:
             self.pretrained_model_name_or_path,
             torch_dtype=torch.bfloat16,
             device_map=device_map,
+            quantization_config=self._quantization_config,
             token=token,
         )
         self.processor = processor_cls.from_pretrained(
@@ -173,7 +213,7 @@ class ColPaliModel:
         )
 
         self.model = self.model.eval()
-        if device_map is None:
+        if device_map is None and not (self._load_in_4bit or self._load_in_8bit):
             self.model = self.model.to(self.device)
 
     def _load_index_state(self):

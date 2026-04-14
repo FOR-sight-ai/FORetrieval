@@ -1068,9 +1068,11 @@ name = "foretrieval"
 version = "0.1"
 source = { editable = "." }
 dependencies = [
+    { name = "bitsandbytes", marker = "extra == 'quant'" },
     { name = "colpali-engine" },
     { name = "docx2pdf" },
     { name = "langdetect" },
+    { name = "matplotlib" },
     { name = "ml-dtypes" },
     { name = "pdf2image" },
     { name = "pydantic-ai" },
@@ -1101,6 +1103,9 @@ langchain = [
 qdrant = [
     { name = "qdrant-client" },
 ]
+quant = [
+    { name = "bitsandbytes" },
+]
 server = [
     { name = "fastapi" },
     { name = "uvicorn" },
@@ -1113,6 +1118,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "bitsandbytes", marker = "extra == 'quant'", specifier = ">=0.43" },
     { name = "colpali-engine", specifier = ">=0.3.4,<0.4.0" },
     { name = "docling", marker = "extra == 'docling'", specifier = ">=2.76.0" },
     { name = "docx2pdf", specifier = ">=0.1.8" },
@@ -1120,6 +1126,7 @@ requires-dist = [
     { name = "fastapi", marker = "extra == 'server'" },
     { name = "langchain-core", marker = "extra == 'langchain'" },
     { name = "langdetect", specifier = ">=1.0.9" },
+    { name = "matplotlib", specifier = ">=3.8.0" },
     { name = "ml-dtypes" },
     { name = "pdf2image", specifier = ">=1.17.0" },
     { name = "pydantic-ai", specifier = ">=1.4.0" },
@@ -1136,6 +1143,7 @@ requires-dist = [
     { name = "transformers", specifier = ">=4.42.0" },
     { name = "uvicorn", marker = "extra == 'server'" },
 ]
+provides-extras = ["dev", "server", "quant", "langchain", "extra-converters"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "matplotlib", specifier = ">=3.10.8" }]

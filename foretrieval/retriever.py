@@ -46,6 +46,10 @@ class MultiModalRetrieverModel:
         ingestion: Dict[str, Any] = {"backend": "default"},
         device: str = "cuda",
         verbose: int = 1,
+        load_in_4bit: bool = False,
+        load_in_8bit: bool = False,
+        bnb_4bit_quant_type: str = "nf4",
+        bnb_4bit_compute_dtype: str = "float16",
     ):
         """Load a ColPali model from a pre-trained checkpoint.
 
@@ -66,6 +70,10 @@ class MultiModalRetrieverModel:
             ingestion=ingestion,
             device=device,
             verbose=verbose,
+            load_in_4bit=load_in_4bit,
+            load_in_8bit=load_in_8bit,
+            bnb_4bit_quant_type=bnb_4bit_quant_type,
+            bnb_4bit_compute_dtype=bnb_4bit_compute_dtype,
         )
         return instance
 
