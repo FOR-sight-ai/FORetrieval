@@ -1,46 +1,221 @@
-## Getting started
+# FORetrieval
 
-Currently, we support all models supported by the underlying [colpali-engine](https://github.com/illuin-tech/colpali), including the newer, and better, ColQwen2 checkpoints, such as `vidore/colqwen2-v1.0`.
+FORetrieval is a multimodal document retrieval library built on top of [colpali-engine](https://github.com/illuin-tech/colpali). It indexes document pages as images using late-interaction models (ColPali, ColQwen2, ColQwen2.5) and retrieves the most relevant pages for a given query. It is used by [FORag](https://github.com/FOR-sight-ai/FORAG) as its retrieval backend.
 
-Additional backends will be supported in future updates. As byaldi exists to facilitate the adoption of multi-modal retrievers, we intend to also add support for models such as [VisRAG](https://github.com/openbmb/visrag).
+Key features:
 
-### Pre-requisites
+- **Two storage backends** — local file-based (Colpali legacy `.pt` files) or Qdrant embedded vector store (default)
+- **Metadata generation** — filesystem metadata always; AI-generated tags, language detection, and short descriptions optionally
+- **Metadata filtering** — filter the retrieval pool by `ext`, `mtime`, `language`, `tags`, `document_type`, or arbitrary regex patterns before scoring
+- **Docling ingestion** — optional semantic PDF chunking using [Docling](https://github.com/DS4SD/docling), producing image chunks aligned with document structure
+- **Heatmap and circle visualisation** — relevance overlays for retrieved pages
 
-#### Poppler
-
-To convert pdf to images with a friendly license, we use the `pdf2image` library. This library requires `poppler` to be installed on your system. Poppler is very easy to install by following the instructions [on their website](https://poppler.freedesktop.org/). The tl;dr is:
-
-__MacOS with homebrew__
+## Installation
 
 ```bash
-brew install poppler
+uv sync
+
+# Optional extras:
+uv sync --extra qdrant    # Qdrant storage backend (recommended for large indexes)
+uv sync --extra docling   # Docling-based PDF chunking
 ```
 
-__Debian/Ubuntu__
+## Pre-requisites
 
+### Poppler
+
+Required by `pdf2image` for PDF-to-image conversion:
+
+**Debian / Ubuntu**
 ```bash
 sudo apt-get install -y poppler-utils
 ```
 
-#### Flash-Attention
+### Flash-Attention (optional)
 
-Gemma uses a recent version of flash attention. To make things run as smoothly as possible, we'd recommend that you install it after installing the library:
+Speeds up ColQwen2 / Gemma-based models significantly:
 
 ```bash
-pip install flash-attn
+uv pip install flash-attn
 ```
 
-#### Hardware
+### Hardware
 
-ColPali uses multi-billion parameter models to encode documents. We recommend using a GPU for smooth operations, though weak/older GPUs are perfectly fine! Encoding your collection would suffer from poor performance on CPU or MPS.
+ColPali uses multi-billion parameter models. A GPU is strongly recommended for indexing and search. Weak or older GPUs (sm_70+) work fine; CPU is supported but slow.
+
+## Quick usage
+
+```python
+from foretrieval import MultiModalRetrieverModel
+
+# Index a folder of PDFs
+model = MultiModalRetrieverModel.from_pretrained(
+    "vidore/colqwen2.5-v0.2",
+    index_root="my_indexes",
+    storage_qdrant=True,   # use Qdrant backend (default)
+)
+model.index(
+    input_path="path/to/docs/",
+    index_name="my_index",
+    store_collection_with_index=True,
+)
+
+# Load an existing index and search
+model = MultiModalRetrieverModel.from_index(
+    index_path="my_index",
+    index_root="my_indexes",
+)
+results = model.search("maximum output current", k=3)
+for r in results:
+    print(r.doc_id, r.page_num, r.score)
+```
+
+## Storage backends
+
+FORetrieval supports two backends for storing embeddings:
+
+| Backend | Constructor flag | Description |
+|---------|-----------------|-------------|
+| **Qdrant** (default) | `storage_qdrant=True` | Embeddings stored in a local embedded Qdrant database under `<index_root>/<index_name>/qdrant/`. Does not load all embeddings into RAM. Requires `foretrieval[qdrant]`. |
+| **Local** | `storage_qdrant=False` | Embeddings saved as `.pt` files, loaded into memory at search time. No extra dependency. |
+
+When loading an existing index with `from_index()`, the backend is read automatically from the saved `index_config.json.gz` — no manual flag needed.
+
+```python
+# Create with Qdrant backend
+model = MultiModalRetrieverModel.from_pretrained(..., storage_qdrant=True)
+
+# Create with local backend
+model = MultiModalRetrieverModel.from_pretrained(..., storage_qdrant=False)
+
+# Load existing index — backend auto-detected
+model = MultiModalRetrieverModel.from_index(index_path="my_index", index_root=".")
+```
+
+## Metadata generation
+
+Metadata can be attached to each document at indexing time. Two levels are available:
+
+**Filesystem metadata (no AI required):** always populated from the file itself.
+
+| Field | Source |
+|-------|--------|
+| `stem`, `ext`, `mime` | filename and MIME type |
+| `mtime` | file modification time (ISO-8601 UTC) |
+| `page_count` | number of pages (PDFs only) |
+| `author`, `title` | embedded PDF metadata (may be absent) |
+| `image_width`, `image_height` | dimensions (images only) |
+
+**AI-generated metadata (requires an LLM provider):** `language`, `tags`, `document_type`, `short_description`.
+
+```python
+from foretrieval.metadata import ai_metadata_provider_factory
+from foretrieval.models_metadata import build_metadata_list_for_dir
+
+# No-AI provider: filesystem fields only
+provider = ai_metadata_provider_factory(None)
+
+# AI provider: enriches with language, tags, document_type, short_description
+provider = ai_metadata_provider_factory({
+    "provider": "openrouter",
+    "name": "mistralai/mistral-small-3.2-24b-instruct",
+    "api_key": "...",
+})
+
+metadata_list = build_metadata_list_for_dir(Path("docs/"), provider)
+
+model.index(
+    input_path="docs/",
+    index_name="my_index",
+    metadata=metadata_list,
+)
+```
+
+## Metadata filtering
+
+When an index was built with metadata, `search()` accepts a `filter_metadata` dict that restricts the scoring pool to matching documents only.
+
+### Declared filter fields
+
+```python
+from foretrieval.models_metadata import MetadataFilter
+
+# Only PDF files
+results = model.search("max current", k=3, filter_metadata={"ext": ".pdf"})
+
+# Files modified after a date
+results = model.search("max current", k=3, filter_metadata={
+    "mtime": {">=": "2025-01-01T00:00:00Z"}
+})
+
+# Multiple criteria (AND by default)
+results = model.search("max current", k=3, filter_metadata={
+    "ext": ".pdf",
+    "language": "en",
+})
+
+# OR logic
+results = model.search("max current", k=3, filter_metadata={
+    "ext": [".pdf", ".docx"],
+    "logic": "OR",
+})
+```
+
+| Filter field | Type | Description |
+|-------------|------|-------------|
+| `ext` | `str` or `list[str]` | File extension(s) |
+| `mtime` | `dict` | Operators: `>=`, `<=`, `>`, `<`, `==` against ISO-8601 string |
+| `language` | `str` or `list[str]` | Language code(s), e.g. `"en"` |
+| `tags` | `str` or `list[str]` | Any tag in common (requires AI metadata) |
+| `document_type` | `str` or `list[str]` | Document type (requires AI metadata) |
+| `logic` | `"AND"` or `"OR"` | How to combine criteria (default: `"AND"`) |
+
+Any other key is matched by exact string equality against the stored metadata dict.
+
+### Regex pattern matching
+
+Use the `regex` field for substring or pattern matching on any text field. Patterns use Python `re.search` and are **always case-insensitive**:
+
+```python
+# Files whose name contains "general"
+results = model.search("max current", k=3, filter_metadata={
+    "regex": {"stem": "general"}
+})
+
+# Title contains "motor" or "pump"
+results = model.search("specs", k=3, filter_metadata={
+    "regex": {"title": "motor|pump"}
+})
+
+# Combine with ext filter
+results = model.search("specs", k=3, filter_metadata={
+    "ext": ".pdf",
+    "regex": {"stem": "^report_2025"},
+})
+```
+
+When the filter matches no documents, `search()` returns an empty list `[]` without raising.
+
+## Docling ingestion
+
+FORetrieval optionally uses [Docling](https://github.com/DS4SD/docling) to convert PDFs into semantically meaningful image chunks rather than whole pages. Each chunk corresponds to a coherent region of text and associated figures.
+
+```python
+model = MultiModalRetrieverModel.from_pretrained(
+    "vidore/colqwen2.5-v0.2",
+    ingestion={"backend": "docling"},
+    index_root="my_indexes",
+)
+model.index(input_path="docs/", index_name="chunked_index")
+```
+
+Results include a `chunk_num` field identifying the exact Docling chunk within the page.
 
 ## Running the test suite
 
 Install the dev dependencies first:
 
 ```bash
-pip install -e ".[dev]"
-# or with uv:
 uv sync --extra dev
 ```
 
@@ -54,34 +229,46 @@ pytest -m "not slow and not integration"
 
 ### Metadata tests (no AI)
 
-Tests for `ai_metadata_provider_factory(None)` and `build_metadata_list_for_dir`.  
-No API key or GPU required:
-
 ```bash
 pytest tests/test_metadata_no_ai.py
 ```
 
 ### Metadata tests (with AI)
 
-Tests for AI-backed metadata generation .  
-Set at least one of the following environment variables before running:
+Set at least one API key:
 
 ```bash
-export OPENROUTER_API_KEY=...   
+export OPENROUTER_API_KEY=...
 export OPENAI_API_KEY=...
 export MISTRAL_API_KEY=...
 export OLLAMA_HOST=http://localhost:11434   # + optionally OLLAMA_MODEL (default: mistral-small-latest)
 ```
 
-All available backends are detected automatically and the suite runs once per backend:
-
 ```bash
 pytest tests/test_metadata_ai.py -v
 ```
 
+All available backends are detected automatically and the suite runs once per backend.
+
+### Qdrant backend tests
+
+```bash
+# Unit tests (no GPU needed, Qdrant mocked)
+pytest tests/test_qdrant.py -m "not slow and not integration"
+
+# Full integration test (GPU + qdrant-client required)
+pytest tests/test_qdrant.py -m "slow and integration"
+```
+
+### Metadata filter tests
+
+```bash
+pytest tests/test_metadata_filter.py
+```
+
 ### Slow tests (GPU-dependent)
 
-Tests that load a real ColPali model and perform indexing/search require a GPU and are gated behind `@pytest.mark.slow`:
+Full ColPali indexing and search:
 
 ```bash
 pytest -m slow
@@ -96,4 +283,4 @@ pytest -m slow
 
 ## Acknowledgements
 
-FORetrieval was forked from Byaldi, [RAGatouille](https://github.com/answerdotai/ragatouille)'s mini sister project. It is a simple wrapper around the [ColPali](https://github.com/illuin-tech/colpali) repository to make it easy to use late-interaction multi-modal models such as ColPALI with a familiar API.
+FORetrieval was originally forked from [Byaldi](https://github.com/answerdotai/byaldi), a wrapper around the [ColPali](https://github.com/illuin-tech/colpali) repository. It has since diverged significantly to add metadata generation and filtering, Qdrant storage, Docling ingestion, and heatmap visualisation.

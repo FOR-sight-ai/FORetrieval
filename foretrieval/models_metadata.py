@@ -65,6 +65,11 @@ class MetadataFilter(BaseModel):
     document_type: Optional[Union[str, List[str]]] = None
     # operators on mtime (ISO)
     mtime: Optional[Dict[str, str]] = None  # ex: {">=":"2025-09-01T00:00:00Z"}
+    # regex patterns: maps any metadata field name to a Python regex pattern.
+    # Applied with re.search(..., re.IGNORECASE) — case-insensitive substring
+    # match by default.  Use explicit (?-i) in the pattern to opt out.
+    # Example: {"stem": "general", "title": "motor|pump"}
+    regex: Optional[Dict[str, str]] = None
 
     # global logic
     logic: str = "AND"  # "AND" or "OR"
