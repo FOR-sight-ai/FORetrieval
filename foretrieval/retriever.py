@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Union, Callable
 from PIL import Image
 
 from .colpali import ColPaliModel
+from .embedding_server import EmbeddingServerConfig
 from .objects import Result
 from .models_metadata import MetadataFilter
 
@@ -46,18 +47,21 @@ class MultiModalRetrieverModel:
         ingestion: Dict[str, Any] = {"backend": "default"},
         device: str = "cuda",
         verbose: int = 1,
+        embedding_server: Optional[EmbeddingServerConfig] = None,
     ):
         """Load a ColPali model from a pre-trained checkpoint.
 
         Parameters:
             pretrained_model_name_or_path (str): Local path or huggingface model name.
             index_root (str): The root directory where indexes will be stored. Default is ".rag_index".
-            ingestion (Dict[str, Any]): Ingestion configuration for the model. Default is {"backend ": "default"}.
+            ingestion (Dict[str, Any]): Ingestion configuration for the model. Default is {"backend": "default"}.
             device (str): The device to load the model on. Default is "cuda".
             verbose (int): Verbosity level. Default is 1.
+            embedding_server (Optional[EmbeddingServerConfig]): If set, embeddings are computed
+                on the remote vLLM server instead of locally. Model weights are not loaded locally.
 
         Returns:
-            cls (RAGMultiModalModel): The current instance of RAGMultiModalModel, with the model initialised.
+            cls (MultiModalRetrieverModel): Initialised instance.
         """
         instance = cls()
         instance.model = ColPaliModel.from_pretrained(
@@ -66,6 +70,7 @@ class MultiModalRetrieverModel:
             ingestion=ingestion,
             device=device,
             verbose=verbose,
+            embedding_server=embedding_server,
         )
         return instance
 
@@ -76,22 +81,28 @@ class MultiModalRetrieverModel:
         index_root: str = ".rag_index",
         device: str = "cuda",
         verbose: int = 1,
+        embedding_server: Optional[EmbeddingServerConfig] = None,
     ):
-        """Load an Index and the associated ColPali model from an existing document index.
+        """Load an index and the associated model from disk.
 
         Parameters:
             index_path (Union[str, Path]): Path to the index.
             device (str): The device to load the model on. Default is "cuda".
+            embedding_server (Optional[EmbeddingServerConfig]): If set, embeddings are computed
+                on the remote vLLM server instead of locally.
 
         Returns:
-            cls (RAGMultiModalModel): The current instance of RAGMultiModalModel, with the model and index initialised.
+            cls (MultiModalRetrieverModel): Initialised instance with index loaded.
         """
         instance = cls()
         index_path = Path(index_path)
         instance.model = ColPaliModel.from_index(
-            index_path, index_root=index_root, device=device, verbose=verbose
+            index_path,
+            index_root=index_root,
+            device=device,
+            verbose=verbose,
+            embedding_server=embedding_server,
         )
-
         return instance
 
     def index(
