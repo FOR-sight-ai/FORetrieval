@@ -96,7 +96,7 @@ def test_embed_single_image_returns_tensor(client):
     assert len(result) == 1
     assert isinstance(result[0], torch.Tensor)
     assert result[0].ndim == 2  # [n_tokens, dim]
-    assert result[0].shape[1] == 128  # ColQwen3.5 embed dim
+    assert result[0].shape[1] == 320  # ColQwen3.5 embed dim
 
 
 @requires_server
@@ -140,7 +140,7 @@ def test_embed_query_returns_single_tensor(client):
     assert len(result) == 1
     assert isinstance(result[0], torch.Tensor)
     assert result[0].ndim == 2
-    assert result[0].shape[1] == 128
+    assert result[0].shape[1] == 320
 
 
 @requires_server
@@ -150,7 +150,7 @@ def test_embed_query_differs_from_image_embedding(client):
     """Query and image embeddings should be in the same space but differ."""
     q_emb = client.embed_query("What is the airspeed?")[0]
     img_emb = client.embed_images([_make_image()])[0]
-    # Both are [n_tokens, 128] — shapes may differ but dtypes should match
+    # Both are [n_tokens, 320] — shapes may differ but dtypes should match
     assert q_emb.dtype == img_emb.dtype
 
 
@@ -191,6 +191,7 @@ def test_colpali_model_remote_embed_images(server_config, tmp_path):
         pretrained_model_name_or_path=_MODEL,
         index_root=str(tmp_path),
         embedding_server=server_config,
+        storage_qdrant=False,  # avoid qdrant dep in integration test env
     )
     assert model._remote_client is not None
     assert model.model is None  # no local weights loaded
@@ -217,7 +218,7 @@ def test_colpali_model_remote_embed_images(server_config, tmp_path):
         pass  # point insertion verified by no exception
     else:
         assert len(model.indexed_embeddings) == 1
-        assert model.indexed_embeddings[0].shape[1] == 128
+        assert model.indexed_embeddings[0].shape[1] == 320  # ColQwen3.5 dim
 
 
 @requires_server

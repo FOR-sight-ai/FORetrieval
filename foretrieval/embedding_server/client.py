@@ -102,7 +102,6 @@ class EmbeddingServerClient:
         payload = {
             "model": self.config.model_name,
             "input": query,
-            "task": "token_embed",
         }
         resp = self._post_pooling(payload)
         data = resp["data"]
@@ -153,27 +152,31 @@ class EmbeddingServerClient:
     def _embed_image_batch(
         self, images: List[Image.Image]
     ) -> List[torch.Tensor]:
-        """Embed a single batch of images (no retry logic here)."""
-        input_items = []
+        """Embed a single batch of images (no retry logic here).
+
+        vLLM >=0.19.0 requires images via PoolingChatRequest (messages array).
+        The flat 'input' field only accepts token id lists, not image content.
+        One request per image — server returns one embedding per call.
+        """
+        tensors = []
         for img in images:
             b64 = _pil_to_base64(img)
-            input_items.append(
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/png;base64,{b64}"},
-                }
-            )
-
-        payload = {
-            "model": self.config.model_name,
-            "input": input_items,
-            "task": "token_embed",
-        }
-        resp = self._post_pooling(payload)
-
-        tensors = []
-        for item in resp["data"]:
-            tensors.append(torch.tensor(item["data"], dtype=torch.float32))
+            payload = {
+                "model": self.config.model_name,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{b64}"},
+                            }
+                        ],
+                    }
+                ],
+            }
+            resp = self._post_pooling(payload)
+            tensors.append(torch.tensor(resp["data"][0]["data"], dtype=torch.float32))
         return tensors
 
     def _post_pooling(self, payload: dict) -> dict:

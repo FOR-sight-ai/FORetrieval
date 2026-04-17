@@ -123,11 +123,13 @@ class TestEmbeddingServerClientRequestFormat:
         payload = kwargs["json"]
 
         assert payload["model"] == "athrael-soju/colqwen3.5-4.5B-v3"
-        assert payload["task"] == "token_embed"
-        assert len(payload["input"]) == 1
-        item = payload["input"][0]
-        assert item["type"] == "image_url"
-        assert item["image_url"]["url"].startswith("data:image/png;base64,")
+        # vLLM >=0.19.0: images sent via messages array (PoolingChatRequest)
+        assert "messages" in payload
+        assert len(payload["messages"]) == 1
+        content = payload["messages"][0]["content"]
+        assert len(content) == 1
+        assert content[0]["type"] == "image_url"
+        assert content[0]["image_url"]["url"].startswith("data:image/png;base64,")
 
     def test_embed_query_sends_text_payload(self):
         client = self._make_client()
@@ -143,7 +145,7 @@ class TestEmbeddingServerClientRequestFormat:
         _, kwargs = mock_post.call_args
         payload = kwargs["json"]
         assert payload["input"] == "What is the speed?"
-        assert payload["task"] == "token_embed"
+        assert "task" not in payload  # text uses flat input, no task key needed
 
     def test_embed_images_uses_correct_endpoint(self):
         client = self._make_client()
@@ -224,17 +226,22 @@ class TestEmbeddingServerClientOOMRetry:
 
         call_count = {"n": 0}
 
+        # With per-image requests, OOM is simulated by failing on the first
+        # attempt at batch_size=4 (the batched loop fails fast), then retrying
+        # with batch_size=2. We fake OOM for the first call only.
+        first_call = {"done": False}
+
         def fake_post(url, json=None, timeout=None):
             call_count["n"] += 1
-            n_items = len(json["input"]) if isinstance(json["input"], list) else 1
-            if n_items > 2:
+            if not first_call["done"]:
+                first_call["done"] = True
                 resp = MagicMock()
                 resp.status_code = 500
                 resp.text = "CUDA out of memory trying to allocate tensor"
                 return resp
             resp = MagicMock()
             resp.status_code = 200
-            resp.json.return_value = _fake_pooling_response(n_items)
+            resp.json.return_value = _fake_pooling_response(1)
             return resp
 
         client._session = MagicMock()
@@ -243,7 +250,7 @@ class TestEmbeddingServerClientOOMRetry:
         images = [_make_image()] * 4
         result = client.embed_images(images)
         assert len(result) == 4
-        # Should have called server multiple times (failed at 4, succeeded at batches of 2)
+        # OOM on first call → retry at smaller batch → multiple calls total
         assert call_count["n"] > 1
 
     def test_oom_at_batch_size_1_raises(self):

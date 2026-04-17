@@ -130,12 +130,7 @@ class EmbeddingServerManager:
 
     def _build_docker_run_cmd(self, n_gpus: int) -> str:
         cfg = self.config
-        # GPU flag: --gpus all or specific count
-        gpu_flag = "--gpus all" if cfg.n_gpus == -1 else f"--gpus '\"device=0"
-        if cfg.n_gpus == -1:
-            gpu_flag = "--gpus all"
-        else:
-            gpu_flag = f"--gpus {cfg.n_gpus}"
+        gpu_flag = "--gpus all" if cfg.n_gpus == -1 else f"--gpus {cfg.n_gpus}"
 
         hf_home = "/opt/huggingface"
         env_parts = [f"-e HF_HOME={hf_home}"]
@@ -144,10 +139,17 @@ class EmbeddingServerManager:
 
         vol_parts = [f"-v {hf_home}:{hf_home}"]
 
+        # vLLM >=0.19.0: image entrypoint is already "vllm serve".
+        # Pass model + flags directly. --task removed; use --runner pooling + --convert embed.
+        # --max-model-len 8192: caps encoder cache budget to avoid OOM on 24GB GPUs.
+        # --gpu-memory-utilization 0.7: leaves headroom for KV cache allocation.
         model_args = (
-            f"--model {cfg.model_name} "
-            f"--task token_embed "
+            f"{cfg.model_name} "
+            f"--runner pooling "
+            f"--convert embed "
             f"--tensor-parallel-size {n_gpus} "
+            f"--gpu-memory-utilization 0.7 "
+            f"--max-model-len 8192 "
             f"--trust-remote-code"
         )
 
@@ -159,6 +161,7 @@ class EmbeddingServerManager:
             f"{' '.join(env_parts)} "
             f"{' '.join(vol_parts)} "
             f"--restart unless-stopped "
+            f"--ipc=host "
             f"{_VLLM_IMAGE} "
             f"{model_args}"
         )
