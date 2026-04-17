@@ -1165,13 +1165,11 @@ class ColPaliModel:
         embeddings_query = self._embed_queries([query])
         qs = list(torch.unbind(embeddings_query.to("cpu")))
 
-        if self.embedding_mode == "local":
-            batch_query = self.processor.process_queries([query])
-            input_ids = batch_query["input_ids"][0].detach().cpu().tolist()
-            tokens = self.processor.tokenizer.convert_ids_to_tokens(input_ids)
-            valid_idxs = [i for i, tok in enumerate(tokens) if tok not in {"<|endoftext|>", "Query", ":"}]
-            return [qs[0][valid_idxs]]
-        return qs
+        batch_query = self.processor.process_queries([query])
+        input_ids = batch_query["input_ids"][0].detach().cpu().tolist()
+        tokens = self.processor.tokenizer.convert_ids_to_tokens(input_ids)
+        valid_idxs = [i for i, tok in enumerate(tokens) if tok not in {"<|endoftext|>", "Query", ":"}]
+        return [qs[0][valid_idxs]]
 
     def _search_local(
         self,
