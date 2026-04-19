@@ -1,4 +1,5 @@
 import base64
+import importlib.util
 import io
 import logging
 import os
@@ -13,6 +14,7 @@ from colpali_engine.models import ColPali, ColPaliProcessor, ColQwen2, ColQwen2_
 from pdf2image import convert_from_path
 from PIL import Image
 import torch
+from transformers import BitsAndBytesConfig
 
 try:
     from qdrant_client import QdrantClient
@@ -41,6 +43,8 @@ from .models_metadata import DocMetadata, MetadataFilter
 from .objects import Result
 from .plot_utils import draw_circle_on_max_patch, pil_from_base64, pil_to_base64_png, compute_patch_heatmap, majority_token_id, build_heatmap_overlays_base64
 from .utils import _value_match
+from .client.embedding_backends import LocalEmbeddingBackend, RemoteEmbeddingBackend
+from .client.remote_backend import RemoteEmbeddingClient
 
 VERSION = "0.0.1"
 
@@ -121,10 +125,52 @@ class ColPaliModel:
         self.enable_circle = False
         self.SOURCE_EXTS = {".doc", ".docx", ".rtf", ".odt", ".ppt", ".pptx", ".odp", ".xls", ".xlsx", ".ods", ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".epub", ".html"}
         self.IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif"}
+        self.embedding_mode = str(kwargs.pop("embedding_mode", "local"))
+        self.embedding_server_url = kwargs.pop("embedding_server_url", None)
+        self.embedding_server_token = kwargs.pop("embedding_server_token", None)
+        self.embedding_request_timeout = float(kwargs.pop("embedding_request_timeout", 30.0))
+        self.embedding_verify_ssl = bool(kwargs.pop("embedding_verify_ssl", True))
 
         self.qdrant_client = None
         self.qdrant_collection = index_name
         self.qdrant_path = None
+
+        load_in_4bit = bool(kwargs.pop("load_in_4bit", False))
+        load_in_8bit = bool(kwargs.pop("load_in_8bit", False))
+        bnb_4bit_quant_type = str(kwargs.pop("bnb_4bit_quant_type", "nf4"))
+        bnb_4bit_compute_dtype = str(kwargs.pop("bnb_4bit_compute_dtype", "float16"))
+
+        if load_in_4bit and load_in_8bit:
+            raise ValueError("Only one quantization mode can be enabled: 4-bit or 8-bit.")
+
+        quantization_config = None
+        if load_in_4bit or load_in_8bit:
+            if importlib.util.find_spec("bitsandbytes") is None:
+                raise ImportError(
+                    "Quantization requested but `bitsandbytes` is not installed. "
+                    "Install it with `pip install bitsandbytes`."
+                )
+            if load_in_4bit:
+                compute_dtype_map = {
+                    "float16": torch.float16,
+                    "bfloat16": torch.bfloat16,
+                    "float32": torch.float32,
+                }
+                if bnb_4bit_compute_dtype not in compute_dtype_map:
+                    raise ValueError(
+                        "Invalid bnb_4bit_compute_dtype. Expected one of: "
+                        "'float16', 'bfloat16', 'float32'."
+                    )
+                quantization_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_quant_type=bnb_4bit_quant_type,
+                    bnb_4bit_compute_dtype=compute_dtype_map[bnb_4bit_compute_dtype],
+                )
+            else:
+                quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+        self._load_in_4bit = load_in_4bit
+        self._load_in_8bit = load_in_8bit
+        self._quantization_config = quantization_config
 
         if self.storage_qdrant and self.index_name is not None:
             self.qdrant_path = Path(self.index_root) / self.index_name / "qdrant"
@@ -135,7 +181,26 @@ class ColPaliModel:
             self.docling_dir = Path(index_root) / self.index_name / "docling_chunks"
             self.docling_dir.mkdir(parents=True, exist_ok=True)
 
-        self._load_model_and_processor()
+        self.embedding_backend = None
+        if self.embedding_mode == "remote":
+            if not self.embedding_server_url:
+                raise ValueError("embedding_server_url is required when embedding_mode='remote'.")
+            self.remote_client = RemoteEmbeddingClient(
+                self.embedding_server_url,
+                model_name=self.pretrained_model_name_or_path,
+                token=self.embedding_server_token,
+                timeout=self.embedding_request_timeout,
+                verify_ssl=self.embedding_verify_ssl,
+            )
+            self.embedding_backend = RemoteEmbeddingBackend(self.remote_client)
+            self._load_remote_processor_only()
+            self.model = None
+        elif self.embedding_mode == "local":
+            self.remote_client = None
+            self._load_model_and_processor()
+            self.embedding_backend = LocalEmbeddingBackend(self.model, self.processor, self.device)
+        else:
+            raise ValueError("embedding_mode must be either 'local' or 'remote'.")
 
         if not load_from_index:
             self.full_document_collection = False
@@ -165,6 +230,7 @@ class ColPaliModel:
             self.pretrained_model_name_or_path,
             torch_dtype=torch.bfloat16,
             device_map=device_map,
+            quantization_config=self._quantization_config,
             token=token,
         )
         self.processor = processor_cls.from_pretrained(
@@ -173,8 +239,27 @@ class ColPaliModel:
         )
 
         self.model = self.model.eval()
-        if device_map is None:
+        if device_map is None and not (self._load_in_4bit or self._load_in_8bit):
             self.model = self.model.to(self.device)
+
+    def _load_remote_processor_only(self):
+        token = self.kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN")
+        model_name = self.pretrained_model_name_or_path.lower()
+        if "colpali" in model_name:
+            self.processor = ColPaliProcessor.from_pretrained(
+                self.pretrained_model_name_or_path,
+                token=token,
+            )
+        elif "colqwen2.5" in model_name:
+            self.processor = ColQwen2_5_Processor.from_pretrained(
+                self.pretrained_model_name_or_path,
+                token=token,
+            )
+        else:
+            self.processor = ColQwen2Processor.from_pretrained(
+                self.pretrained_model_name_or_path,
+                token=token,
+            )
 
     def _load_index_state(self):
         if self.index_name is None:
@@ -859,17 +944,7 @@ class ColPaliModel:
         # Optionnel mais utile : taille originale de l'image
         orig_sizes = [img.size for img in images]  # (W,H) PIL
 
-        # Generate embeddings
-        with torch.inference_mode():
-            processed_images = {
-                k: v.to(self.device).to(
-                    self.model.dtype
-                    if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
-                    else v.dtype
-                )
-                for k, v in processed_images.items()
-            }
-            embeddings = self.model(**processed_images)
+        embeddings = self._embed_images(images)
 
         # 1. Compute embeddings
         # 2. Ensure backend storage and check duplicates
@@ -1089,19 +1164,10 @@ class ColPaliModel:
     # ============================================================
 
     def _encode_search_query(self, query: str):
-        with torch.inference_mode():
-            batch_query = self.processor.process_queries([query])
-            batch_query = {
-                kk: vv.to(self.device).to(
-                    self.model.dtype
-                    if vv.dtype in [torch.float16, torch.bfloat16, torch.float32]
-                    else vv.dtype
-                )
-                for kk, vv in batch_query.items()
-            }
-            embeddings_query = self.model(**batch_query)
-            qs = list(torch.unbind(embeddings_query.to("cpu")))
+        embeddings_query = self._embed_queries([query])
+        qs = list(torch.unbind(embeddings_query.to("cpu")))
 
+        batch_query = self.processor.process_queries([query])
         input_ids = batch_query["input_ids"][0].detach().cpu().tolist()
         tokens = self.processor.tokenizer.convert_ids_to_tokens(input_ids)
         valid_idxs = [i for i, tok in enumerate(tokens) if tok not in {"<|endoftext|>", "Query", ":"}]
@@ -1498,6 +1564,57 @@ class ColPaliModel:
     # ============================================================
     # File helpers
     # ============================================================
+
+    def encode_image(
+        self, input_data: Union[str, Image.Image, List[Union[str, Image.Image]]]
+    ) -> torch.Tensor:
+        if not isinstance(input_data, list):
+            input_data = [input_data]
+
+        images = []
+        for item in input_data:
+            if isinstance(item, Image.Image):
+                images.append(item)
+            elif isinstance(item, str):
+                if os.path.isdir(item):
+                    for file in os.listdir(item):
+                        if file.lower().endswith(
+                            (".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".gif")
+                        ):
+                            images.append(Image.open(os.path.join(item, file)))
+                elif item.lower().endswith(".pdf"):
+                    with tempfile.TemporaryDirectory() as path:
+                        pdf_images = convert_from_path(
+                            item, thread_count=os.cpu_count() - 1, output_folder=path
+                        )
+                        images.extend(pdf_images)
+                elif item.lower().endswith(
+                    (".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".gif")
+                ):
+                    images.append(Image.open(item))
+                else:
+                    raise ValueError(f"Unsupported file type: {item}")
+            else:
+                raise ValueError(f"Unsupported input type: {type(item)}")
+
+        return self._embed_images(images).cpu()
+
+    def encode_query(self, query: Union[str, List[str]]) -> torch.Tensor:
+        if isinstance(query, str):
+            query = [query]
+
+        return self._embed_queries(query).cpu()
+
+    def _embed_images(self, images: List[Image.Image]) -> torch.Tensor:
+        if self.embedding_backend is None:
+            raise RuntimeError("Embedding backend is not initialized.")
+        return self.embedding_backend.embed_images(images)
+
+    def _embed_queries(self, query: Union[str, List[str]]) -> torch.Tensor:
+        queries = [query] if isinstance(query, str) else query
+        if self.embedding_backend is None:
+            raise RuntimeError("Embedding backend is not initialized.")
+        return self.embedding_backend.embed_queries(queries)
 
     def _looks_like_pdf(self, path: Path) -> bool:
         try:

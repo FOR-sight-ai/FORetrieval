@@ -44,8 +44,19 @@ class MultiModalRetrieverModel:
         pretrained_model_name_or_path: Union[str, Path],
         index_root: str = ".rag_index",
         ingestion: Dict[str, Any] = {"backend": "default"},
+        storage_qdrant: bool = False,
         device: str = "cuda",
         verbose: int = 1,
+        hf_token: Optional[str] = None,
+        embedding_mode: str = "local",
+        embedding_server_url: Optional[str] = None,
+        embedding_server_token: Optional[str] = None,
+        embedding_request_timeout: float = 30.0,
+        embedding_verify_ssl: bool = True,
+        load_in_4bit: bool = False,
+        load_in_8bit: bool = False,
+        bnb_4bit_quant_type: str = "nf4",
+        bnb_4bit_compute_dtype: str = "float16",
     ):
         """Load a ColPali model from a pre-trained checkpoint.
 
@@ -64,8 +75,19 @@ class MultiModalRetrieverModel:
             pretrained_model_name_or_path,
             index_root=index_root,
             ingestion=ingestion,
+            storage_qdrant=storage_qdrant,
             device=device,
             verbose=verbose,
+            hf_token=hf_token,
+            embedding_mode=embedding_mode,
+            embedding_server_url=embedding_server_url,
+            embedding_server_token=embedding_server_token,
+            embedding_request_timeout=embedding_request_timeout,
+            embedding_verify_ssl=embedding_verify_ssl,
+            load_in_4bit=load_in_4bit,
+            load_in_8bit=load_in_8bit,
+            bnb_4bit_quant_type=bnb_4bit_quant_type,
+            bnb_4bit_compute_dtype=bnb_4bit_compute_dtype,
         )
         return instance
 

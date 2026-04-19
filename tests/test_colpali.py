@@ -12,7 +12,13 @@ from foretrieval.colpali import ColPaliModel
 def colpali_rag_model() -> Generator[MultiModalRetrieverModel, None, None]:
     device = get_torch_device("auto")
     print(f"Using device: {device}")
-    yield MultiModalRetrieverModel.from_pretrained("vidore/colpali-v1.3", device=device)
+    yield MultiModalRetrieverModel.from_pretrained(
+        "vidore/colpali-v1.3",
+        device=device,
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype="float16",
+    )
     tear_down_torch()
 
 
