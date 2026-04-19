@@ -16,6 +16,7 @@ class RemoteEmbeddingClient:
         model_name: str,
         token: Optional[str] = None,
         timeout: float = 30.0,
+        verify_ssl: bool = True,
     ):
         try:
             import httpx
@@ -30,7 +31,7 @@ class RemoteEmbeddingClient:
         headers = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        self.client = httpx.Client(timeout=timeout, headers=headers)
+        self.client = httpx.Client(timeout=timeout, headers=headers, verify=verify_ssl)
 
     @staticmethod
     def _image_to_bytes(image: Image.Image) -> bytes:

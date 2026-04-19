@@ -129,6 +129,7 @@ class ColPaliModel:
         self.embedding_server_url = kwargs.pop("embedding_server_url", None)
         self.embedding_server_token = kwargs.pop("embedding_server_token", None)
         self.embedding_request_timeout = float(kwargs.pop("embedding_request_timeout", 30.0))
+        self.embedding_verify_ssl = bool(kwargs.pop("embedding_verify_ssl", True))
 
         self.qdrant_client = None
         self.qdrant_collection = index_name
@@ -189,6 +190,7 @@ class ColPaliModel:
                 model_name=self.pretrained_model_name_or_path,
                 token=self.embedding_server_token,
                 timeout=self.embedding_request_timeout,
+                verify_ssl=self.embedding_verify_ssl,
             )
             self.embedding_backend = RemoteEmbeddingBackend(self.remote_client)
             self._load_remote_processor_only()
