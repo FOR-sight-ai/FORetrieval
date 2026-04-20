@@ -130,6 +130,17 @@ class ColPaliModel:
         self.embedding_server_token = kwargs.pop("embedding_server_token", None)
         self.embedding_request_timeout = float(kwargs.pop("embedding_request_timeout", 30.0))
         self.embedding_verify_ssl = bool(kwargs.pop("embedding_verify_ssl", True))
+        self.embedding_concurrency = int(kwargs.pop("embedding_concurrency", 1))
+        self.embedding_request_batch_size = kwargs.pop("embedding_request_batch_size", None)
+        if self.embedding_concurrency < 1:
+            raise ValueError("embedding_concurrency must be >= 1.")
+        if self.embedding_request_batch_size is not None:
+            self.embedding_request_batch_size = int(self.embedding_request_batch_size)
+            if self.embedding_request_batch_size < 1:
+                raise ValueError("embedding_request_batch_size must be >= 1 when provided.")
+        self.flash_attention_mode = str(kwargs.pop("flash_attention_mode", "auto")).strip().lower()
+        if self.flash_attention_mode not in {"auto", "on", "off"}:
+            raise ValueError("flash_attention_mode must be one of: auto, on, off.")
 
         self.qdrant_client = None
         self.qdrant_collection = index_name
@@ -191,6 +202,8 @@ class ColPaliModel:
                 token=self.embedding_server_token,
                 timeout=self.embedding_request_timeout,
                 verify_ssl=self.embedding_verify_ssl,
+                concurrency=self.embedding_concurrency,
+                request_batch_size=self.embedding_request_batch_size,
             )
             self.embedding_backend = RemoteEmbeddingBackend(self.remote_client)
             self._load_remote_processor_only()
@@ -215,6 +228,7 @@ class ColPaliModel:
         token = self.kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN")
         is_cuda = self.device == "cuda" or (isinstance(self.device, torch.device) and self.device.type == "cuda")
         device_map = "cuda" if is_cuda else None
+        flash_attn_available = importlib.util.find_spec("flash_attn") is not None
 
         if "colpali" in self.pretrained_model_name_or_path.lower():
             model_cls = ColPali
@@ -226,12 +240,33 @@ class ColPaliModel:
             model_cls = ColQwen2
             processor_cls = ColQwen2Processor
 
+        model_kwargs = {
+            "torch_dtype": torch.bfloat16,
+            "device_map": device_map,
+            "quantization_config": self._quantization_config,
+            "token": token,
+        }
+        if self.flash_attention_mode == "on":
+            if not is_cuda:
+                raise RuntimeError("flash_attention_mode='on' requires CUDA device.")
+            if not flash_attn_available:
+                raise RuntimeError("flash_attention_mode='on' but flash_attn is not installed.")
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+            logger.info("Using Flash-Attention 2 for model loading (flash_attention_mode=on).")
+        elif self.flash_attention_mode == "off":
+            logger.info("Using default attention implementation for model loading (flash_attention_mode=off).")
+        elif is_cuda and flash_attn_available:
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+            logger.info("Using Flash-Attention 2 for model loading (flash_attention_mode=auto).")
+        else:
+            logger.info(
+                "Using default attention implementation for model loading "
+                f"(flash_attention_mode=auto, is_cuda={is_cuda}, flash_attn_available={flash_attn_available})."
+            )
+
         self.model = model_cls.from_pretrained(
             self.pretrained_model_name_or_path,
-            torch_dtype=torch.bfloat16,
-            device_map=device_map,
-            quantization_config=self._quantization_config,
-            token=token,
+            **model_kwargs,
         )
         self.processor = processor_cls.from_pretrained(
             self.pretrained_model_name_or_path,

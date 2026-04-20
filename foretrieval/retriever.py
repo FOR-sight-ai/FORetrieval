@@ -49,14 +49,12 @@ class MultiModalRetrieverModel:
         verbose: int = 1,
         hf_token: Optional[str] = None,
         embedding_mode: str = "local",
-        embedding_server_url: Optional[str] = None,
-        embedding_server_token: Optional[str] = None,
-        embedding_request_timeout: float = 30.0,
-        embedding_verify_ssl: bool = True,
+        remote: Optional[Dict[str, Any]] = None,
         load_in_4bit: bool = False,
         load_in_8bit: bool = False,
         bnb_4bit_quant_type: str = "nf4",
         bnb_4bit_compute_dtype: str = "float16",
+        flash_attention_mode: str = "auto",
     ):
         """Load a ColPali model from a pre-trained checkpoint.
 
@@ -70,6 +68,7 @@ class MultiModalRetrieverModel:
         Returns:
             cls (RAGMultiModalModel): The current instance of RAGMultiModalModel, with the model initialised.
         """
+        remote_cfg: Dict[str, Any] = remote or {}
         instance = cls()
         instance.model = ColPaliModel.from_pretrained(
             pretrained_model_name_or_path,
@@ -80,14 +79,17 @@ class MultiModalRetrieverModel:
             verbose=verbose,
             hf_token=hf_token,
             embedding_mode=embedding_mode,
-            embedding_server_url=embedding_server_url,
-            embedding_server_token=embedding_server_token,
-            embedding_request_timeout=embedding_request_timeout,
-            embedding_verify_ssl=embedding_verify_ssl,
+            embedding_server_url=remote_cfg.get("url"),
+            embedding_server_token=remote_cfg.get("token"),
+            embedding_request_timeout=remote_cfg.get("request_timeout", 30.0),
+            embedding_verify_ssl=remote_cfg.get("verify_ssl", True),
+            embedding_concurrency=remote_cfg.get("concurrency", 1),
+            embedding_request_batch_size=remote_cfg.get("request_batch_size"),
             load_in_4bit=load_in_4bit,
             load_in_8bit=load_in_8bit,
             bnb_4bit_quant_type=bnb_4bit_quant_type,
             bnb_4bit_compute_dtype=bnb_4bit_compute_dtype,
+            flash_attention_mode=flash_attention_mode,
         )
         return instance
 

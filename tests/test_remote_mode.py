@@ -23,10 +23,12 @@ def test_wrapper_forwards_remote_mode_args(monkeypatch):
     _ = MultiModalRetrieverModel.from_pretrained(
         "vidore/colqwen2-v1.0",
         embedding_mode="remote",
-        embedding_server_url="http://localhost:8000",
-        embedding_server_token="abc",
-        embedding_request_timeout=12.0,
-        embedding_verify_ssl=False,
+        remote={
+            "url": "http://localhost:8000",
+            "token": "abc",
+            "request_timeout": 12.0,
+            "verify_ssl": False,
+        },
     )
 
     assert captured["kwargs"]["embedding_mode"] == "remote"
