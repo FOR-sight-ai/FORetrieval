@@ -139,3 +139,6 @@ pylate/*
 pylate/
 
 .byaldi/
+
+.pat
+
