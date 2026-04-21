@@ -1,0 +1,79 @@
+{
+  "solution": "B",
+  "server_url": "http://localhost:8001",
+  "model_name": "vidore/colqwen2-v1.0",
+  "n_docs": 2,
+  "n_pages": 72,
+  "indexing_time_s": 11.73,
+  "pages_per_sec": 6.14,
+  "vram_before_index_mb": 4881.0,
+  "vram_after_index_mb": 6665.0,
+  "vram_peak_mb": 6665.0,
+  "queries": [
+    {
+      "query": "What is the normal operating cabin altitude in cruise for the A320?",
+      "latency_mean_s": 0.0498,
+      "latency_std_s": 0.0023,
+      "latency_all_s": [
+        0.0544,
+        0.049,
+        0.0487,
+        0.0486,
+        0.0485
+      ],
+      "top_3_pages": null
+    },
+    {
+      "query": "How is the bleed air supply to the air conditioning system controlled on the A320?",
+      "latency_mean_s": 0.049,
+      "latency_std_s": 0.0013,
+      "latency_all_s": [
+        0.0486,
+        0.0482,
+        0.0484,
+        0.0516,
+        0.0481
+      ],
+      "top_3_pages": null
+    },
+    {
+      "query": "What happens to pressurization if both outflow valves fail in the open position?",
+      "latency_mean_s": 0.0481,
+      "latency_std_s": 0.0001,
+      "latency_all_s": [
+        0.0483,
+        0.048,
+        0.0482,
+        0.0481,
+        0.0481
+      ],
+      "top_3_pages": null
+    },
+    {
+      "query": "What is the purpose of the Ram Air inlet on the A320 air conditioning system?",
+      "latency_mean_s": 0.0492,
+      "latency_std_s": 0.0018,
+      "latency_all_s": [
+        0.0479,
+        0.0481,
+        0.0526,
+        0.0486,
+        0.0486
+      ],
+      "top_3_pages": null
+    },
+    {
+      "query": "Describe the function of the Pack Flow Control Valve and its operating modes.",
+      "latency_mean_s": 0.0482,
+      "latency_std_s": 0.0001,
+      "latency_all_s": [
+        0.0483,
+        0.0481,
+        0.0482,
+        0.0481,
+        0.0483
+      ],
+      "top_3_pages": null
+    }
+  ]
+}

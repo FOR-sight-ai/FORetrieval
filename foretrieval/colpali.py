@@ -10,6 +10,15 @@ from tqdm import tqdm
 from typing import Dict, List, Optional, Union, Any, Callable
 
 from colpali_engine.models import ColPali, ColPaliProcessor, ColQwen2, ColQwen2_5, ColQwen2_5_Processor, ColQwen2Processor
+
+# ColQwen3_5 added in colpali-engine 0.3.15
+try:
+    from colpali_engine.models import ColQwen3_5, ColQwen3_5Processor
+    _COLQWEN3_5_AVAILABLE = True
+except ImportError:
+    _COLQWEN3_5_AVAILABLE = False
+
+from .embedding_server import EmbeddingServerClient, EmbeddingServerConfig, EmbeddingServerManager
 from pdf2image import convert_from_path
 from PIL import Image
 import torch
@@ -77,13 +86,22 @@ class ColPaliModel:
         device: Optional[Union[str, torch.device]] = None,
         ingestion: Dict[str, Any] = {"backend": "default"},
         storage_qdrant: bool = True,
+        embedding_server: Optional[EmbeddingServerConfig] = None,
+        load_in_4bit: bool = False,
+        load_in_8bit: bool = False,
+        bnb_4bit_quant_type: str = "nf4",
+        bnb_4bit_compute_dtype: str = "float16",
         **kwargs,
     ):
         if isinstance(pretrained_model_name_or_path, Path):
             pretrained_model_name_or_path = str(pretrained_model_name_or_path)
 
-        if ("colpali" not in pretrained_model_name_or_path.lower() and "colqwen2" not in pretrained_model_name_or_path.lower()):
-            raise ValueError("This pre-release version of Byaldi only supports ColPali and ColQwen2 for now. Incorrect model name specified.")
+        _supported = ("colpali", "colqwen2", "colqwen3")
+        if not any(k in pretrained_model_name_or_path.lower() for k in _supported):
+            raise ValueError(
+                "FORetrieval supports ColPali, ColQwen2, ColQwen2.5, and ColQwen3.x models. "
+                "Incorrect model name specified."
+            )
         self.pretrained_model_name_or_path = pretrained_model_name_or_path
         self.model_name = self.pretrained_model_name_or_path
         self.verbose = verbose
@@ -106,6 +124,10 @@ class ColPaliModel:
 
         self.n_gpu = torch.cuda.device_count() if n_gpu == -1 else n_gpu
         self.device = device or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+        self.load_in_4bit = load_in_4bit
+        self.load_in_8bit = load_in_8bit
+        self.bnb_4bit_quant_type = bnb_4bit_quant_type
+        self.bnb_4bit_compute_dtype = bnb_4bit_compute_dtype
 
         self.collection = {}
         self.embed_id_to_extra = {}
@@ -135,7 +157,17 @@ class ColPaliModel:
             self.docling_dir = Path(index_root) / self.index_name / "docling_chunks"
             self.docling_dir.mkdir(parents=True, exist_ok=True)
 
-        self._load_model_and_processor()
+        # --- Remote embedding server ---
+        self._remote_client: Optional[EmbeddingServerClient] = None
+        if embedding_server is not None:
+            if embedding_server.auto_deploy:
+                manager = EmbeddingServerManager(embedding_server)
+                manager.ensure_deployed()
+            self._remote_client = EmbeddingServerClient(embedding_server)
+            # In remote mode: load processor only (CPU), skip model weights.
+            self._load_processor_only()
+        else:
+            self._load_model_and_processor()
 
         if not load_from_index:
             self.full_document_collection = False
@@ -146,26 +178,71 @@ class ColPaliModel:
         else:
             self._load_index_state()
 
+    def _resolve_model_and_processor_classes(self):
+        """Return (model_cls, processor_cls) for the configured model name."""
+        name = self.pretrained_model_name_or_path.lower()
+        if "colpali" in name:
+            return ColPali, ColPaliProcessor
+        elif "colqwen3.5" in name or "colqwen3_5" in name:
+            if not _COLQWEN3_5_AVAILABLE:
+                raise ImportError(
+                    "ColQwen3_5 requires colpali-engine>=0.3.15. "
+                    "Upgrade with: pip install 'colpali-engine>=0.3.15'"
+                )
+            return ColQwen3_5, ColQwen3_5Processor
+        elif "colqwen2.5" in name:
+            return ColQwen2_5, ColQwen2_5_Processor
+        else:
+            # ColQwen2 and ColQwen3 (non-3.5) both use the ColQwen2 interface
+            return ColQwen2, ColQwen2Processor
+
     def _load_model_and_processor(self):
         token = self.kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN")
         is_cuda = self.device == "cuda" or (isinstance(self.device, torch.device) and self.device.type == "cuda")
         device_map = "cuda" if is_cuda else None
 
-        if "colpali" in self.pretrained_model_name_or_path.lower():
-            model_cls = ColPali
-            processor_cls = ColPaliProcessor
-        elif "colqwen2.5" in self.pretrained_model_name_or_path.lower():
-            model_cls = ColQwen2_5
-            processor_cls = ColQwen2_5_Processor
-        else:
-            model_cls = ColQwen2
-            processor_cls = ColQwen2Processor
+        model_cls, processor_cls = self._resolve_model_and_processor_classes()
 
-        self.model = model_cls.from_pretrained(
-            self.pretrained_model_name_or_path,
+        # Build quantization config if requested (requires bitsandbytes).
+        quantization_config = None
+        if self.load_in_4bit or self.load_in_8bit:
+            try:
+                from transformers import BitsAndBytesConfig
+            except ImportError as exc:
+                raise ImportError(
+                    "4-bit/8-bit quantization requires the bitsandbytes package.\n"
+                    "Install it with:  pip install \"foretrieval[quantization]\"\n"
+                    "or:               uv add foretrieval --extra quantization"
+                ) from exc
+            if not is_cuda:
+                raise ValueError(
+                    "4-bit/8-bit quantization requires a CUDA device. "
+                    f"Current device: {self.device}"
+                )
+            _dtype_map = {
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16,
+                "float32": torch.float32,
+            }
+            compute_dtype = _dtype_map.get(self.bnb_4bit_compute_dtype, torch.float16)
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=self.load_in_4bit,
+                load_in_8bit=self.load_in_8bit,
+                bnb_4bit_quant_type=self.bnb_4bit_quant_type,
+                bnb_4bit_compute_dtype=compute_dtype,
+            )
+
+        load_kwargs: Dict[str, Any] = dict(
             torch_dtype=torch.bfloat16,
             device_map=device_map,
             token=token,
+        )
+        if quantization_config is not None:
+            load_kwargs["quantization_config"] = quantization_config
+
+        self.model = model_cls.from_pretrained(
+            self.pretrained_model_name_or_path,
+            **load_kwargs,
         )
         self.processor = processor_cls.from_pretrained(
             self.pretrained_model_name_or_path,
@@ -175,6 +252,21 @@ class ColPaliModel:
         self.model = self.model.eval()
         if device_map is None:
             self.model = self.model.to(self.device)
+
+    def _load_processor_only(self):
+        """Load only the processor (no model weights) for remote embedding mode.
+
+        The processor handles image preprocessing and query tokenisation on the
+        client side, which is needed to build heatmap sidecars and encode queries
+        for the /pooling endpoint.  No GPU memory is consumed.
+        """
+        token = self.kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN")
+        _, processor_cls = self._resolve_model_and_processor_classes()
+        self.processor = processor_cls.from_pretrained(
+            self.pretrained_model_name_or_path,
+            token=token,
+        )
+        self.model = None  # explicitly not loaded
 
     def _load_index_state(self):
         if self.index_name is None:
@@ -352,6 +444,7 @@ class ColPaliModel:
         verbose: int = 1,
         device: Optional[Union[str, torch.device]] = None,
         index_root: str = ".foretrieval",
+        embedding_server: Optional[EmbeddingServerConfig] = None,
         **kwargs,
     ):
         return cls(
@@ -362,6 +455,7 @@ class ColPaliModel:
             load_from_index=False,
             index_root=index_root,
             device=device,
+            embedding_server=embedding_server,
             **kwargs,
         )
 
@@ -373,6 +467,7 @@ class ColPaliModel:
         verbose: int = 1,
         device: Optional[Union[str, torch.device]] = None,
         index_root: str = ".foretrieval",
+        embedding_server: Optional[EmbeddingServerConfig] = None,
         **kwargs,
     ):
         index_path = Path(os.path.join(Path(index_root), Path(index_path)))
@@ -389,6 +484,7 @@ class ColPaliModel:
             index_root=str(index_path.parent),
             device=device,
             storage_qdrant=storage_qdrant,
+            embedding_server=embedding_server,
             **kwargs,
         )
 
@@ -849,32 +945,34 @@ class ColPaliModel:
                     ):
                         raise ValueError(f"Document ID {doc_id} with page ID {page_id} already exists in the index")
 
-        # Process images in batches
+        # Process images locally (CPU) for heatmap sidecars — always needed
+        # regardless of whether embeddings are computed locally or remotely.
         processed_images = self.processor.process_images(images)
 
-        # --- NEW: garder des infos CPU pour debug/heatmap ---
-        # (before moving to GPU)
+        # Sidecar data for heatmap visualisation (CPU tensors).
         input_ids_cpu = processed_images["input_ids"].detach().cpu()
-        grid_cpu = processed_images["image_grid_thw"].detach().cpu()
-        # Optionnel mais utile : taille originale de l'image
+        grid_cpu = processed_images.get("image_grid_thw")
+        if grid_cpu is not None:
+            grid_cpu = grid_cpu.detach().cpu()
         orig_sizes = [img.size for img in images]  # (W,H) PIL
 
-        # Generate embeddings
-        with torch.inference_mode():
-            processed_images = {
-                k: v.to(self.device).to(
-                    self.model.dtype
-                    if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
-                    else v.dtype
-                )
-                for k, v in processed_images.items()
-            }
-            embeddings = self.model(**processed_images)
-
-        # 1. Compute embeddings
-        # 2. Ensure backend storage and check duplicates
-        # 3. Store embeddings and sidecar data
-        embeddings_list = list(torch.unbind(embeddings.to("cpu")))
+        # Generate embeddings — remote or local path.
+        if self._remote_client is not None:
+            # Remote: send images to vLLM server, get multi-vector tensors back.
+            embeddings_list = self._remote_client.embed_images(images)
+        else:
+            # Local: run model on GPU.
+            with torch.inference_mode():
+                processed_images_gpu = {
+                    k: v.to(self.device).to(
+                        self.model.dtype
+                        if v.dtype in [torch.float16, torch.bfloat16, torch.float32]
+                        else v.dtype
+                    )
+                    for k, v in processed_images.items()
+                }
+                embeddings = self.model(**processed_images_gpu)
+            embeddings_list = list(torch.unbind(embeddings.to("cpu")))
 
         if self.storage_qdrant:
             dim = int(embeddings_list[0].shape[-1])
@@ -926,7 +1024,7 @@ class ColPaliModel:
 
                 self.embed_id_to_extra[point_id] = {
                     "input_ids": input_ids_cpu[i],
-                    "image_grid_thw": grid_cpu[i],
+                    "image_grid_thw": grid_cpu[i] if grid_cpu is not None else None,
                     "orig_size": orig_sizes[i],
                 }
 
@@ -934,7 +1032,7 @@ class ColPaliModel:
                     img_str = self._post_process_image(images[i])
                     self.collection[int(point_id)] = img_str
 
-            else:   
+            else:
                 entry = {
                     "doc_id": int(doc_id),
                     "page_id": int(page_id),
@@ -947,7 +1045,7 @@ class ColPaliModel:
 
                 self.embed_id_to_extra[embed_id] = {
                     "input_ids": input_ids_cpu[i],
-                    "image_grid_thw": grid_cpu[i],
+                    "image_grid_thw": grid_cpu[i] if grid_cpu is not None else None,
                     "orig_size": orig_sizes[i],
                 }
 
@@ -1089,6 +1187,11 @@ class ColPaliModel:
     # ============================================================
 
     def _encode_search_query(self, query: str):
+        if self._remote_client is not None:
+            # Remote path: send query text to vLLM /pooling endpoint.
+            return self._remote_client.embed_query(query)
+
+        # Local path: run model on GPU.
         with torch.inference_mode():
             batch_query = self.processor.process_queries([query])
             batch_query = {
