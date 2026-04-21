@@ -5,6 +5,10 @@ from typing import Optional
 
 from pydantic import BaseModel, field_validator, model_validator
 
+# Model name substrings that vLLM supports for the /pooling endpoint.
+# Only ColQwen3 / ColQwen3.5 architecture is supported in vLLM >=0.19.0.
+_VLLM_COMPATIBLE_PATTERNS = ("colqwen3",)
+
 
 class EmbeddingServerConfig(BaseModel):
     """Configuration for a remote vLLM embedding server.
@@ -17,6 +21,9 @@ class EmbeddingServerConfig(BaseModel):
         url: Full base URL of the vLLM server, e.g. "http://gpu-server:8000".
         model_name: HuggingFace model ID served by the vLLM instance,
             e.g. "athrael-soju/colqwen3.5-4.5B-v3".
+            Must contain "colqwen3" — vLLM >=0.19.0 only supports the
+            ColQwen3/ColQwen3.5 architecture for the /pooling endpoint.
+            ColPali, ColQwen2, and ColQwen2.5 are not supported by vLLM.
         auto_deploy: When True, FORetrieval will SSH to ssh_host and
             deploy a Docker container if the server is not already running.
             Requires ssh_host to be set.
@@ -30,6 +37,11 @@ class EmbeddingServerConfig(BaseModel):
         port: Port to expose the vLLM server on. Default 8000.
         hf_token: HuggingFace token passed as HF_TOKEN env var to the
             Docker container for downloading gated models.
+        api_key: Optional bearer token for server authentication.
+            When set, requests include "Authorization: Bearer <api_key>".
+            Deploy the vLLM server with --api-key <api_key> to enable.
+        verify_ssl: Whether to verify SSL certificates. Default True.
+            Set to False for servers with self-signed certificates.
         batch_size: Initial number of images per /pooling request.
             Automatically halved on CUDA OOM, down to a minimum of 1.
         request_timeout: HTTP request timeout in seconds. Default 120.
@@ -44,6 +56,8 @@ class EmbeddingServerConfig(BaseModel):
     n_gpus: int = -1
     port: int = 8000
     hf_token: Optional[str] = None
+    api_key: Optional[str] = None
+    verify_ssl: bool = True
     batch_size: int = 4
     request_timeout: int = 120
 
@@ -51,6 +65,21 @@ class EmbeddingServerConfig(BaseModel):
     @classmethod
     def strip_trailing_slash(cls, v: str) -> str:
         return v.rstrip("/")
+
+    @field_validator("model_name")
+    @classmethod
+    def validate_vllm_compatible_model(cls, v: str) -> str:
+        lower = v.lower()
+        if not any(pat in lower for pat in _VLLM_COMPATIBLE_PATTERNS):
+            raise ValueError(
+                f"model_name '{v}' does not appear to be compatible with the vLLM "
+                f"/pooling endpoint. vLLM >=0.19.0 supports only ColQwen3/ColQwen3.5 "
+                f"models (model name must contain 'colqwen3'). "
+                f"ColPali, ColQwen2, and ColQwen2.5 are not supported by vLLM. "
+                f"Use a ColQwen3.5 model such as 'athrael-soju/colqwen3.5-4.5B-v3', "
+                f"or run the model locally without an embedding server."
+            )
+        return v
 
     @field_validator("n_gpus")
     @classmethod

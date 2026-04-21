@@ -25,7 +25,7 @@ authors = [{ name = "The FOR team", email = "for@irt-saintexupery.com" }]
 
 dependencies = [
     "colpali-engine>=0.3.15,<0.4.0",
-    "requests>=2.32",
+    "httpx>=0.27.0",
     "docx2pdf>=0.1.8",
     "langdetect>=1.0.9",
     "ml-dtypes",
@@ -44,6 +44,8 @@ qdrant = ["qdrant-client>=1.17.1"]
 # Docling-based PDF chunking ingestion pipeline
 docling = ["docling>=2.76.0"]
 embedding_server = ["paramiko>=3.0"]
+# 4-bit / 8-bit quantization for local ColPaliModel (requires CUDA)
+quantization = ["bitsandbytes>=0.42.0"]
 dev = ["pytest>=7.4.0", "pytest-mock>=3.0", "ruff>=0.1.9"]
 langchain = ["langchain-core"]
 extra_converters = [

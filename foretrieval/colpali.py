@@ -87,6 +87,10 @@ class ColPaliModel:
         ingestion: Dict[str, Any] = {"backend": "default"},
         storage_qdrant: bool = True,
         embedding_server: Optional[EmbeddingServerConfig] = None,
+        load_in_4bit: bool = False,
+        load_in_8bit: bool = False,
+        bnb_4bit_quant_type: str = "nf4",
+        bnb_4bit_compute_dtype: str = "float16",
         **kwargs,
     ):
         if isinstance(pretrained_model_name_or_path, Path):
@@ -120,6 +124,10 @@ class ColPaliModel:
 
         self.n_gpu = torch.cuda.device_count() if n_gpu == -1 else n_gpu
         self.device = device or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+        self.load_in_4bit = load_in_4bit
+        self.load_in_8bit = load_in_8bit
+        self.bnb_4bit_quant_type = bnb_4bit_quant_type
+        self.bnb_4bit_compute_dtype = bnb_4bit_compute_dtype
 
         self.collection = {}
         self.embed_id_to_extra = {}
@@ -195,11 +203,46 @@ class ColPaliModel:
 
         model_cls, processor_cls = self._resolve_model_and_processor_classes()
 
-        self.model = model_cls.from_pretrained(
-            self.pretrained_model_name_or_path,
+        # Build quantization config if requested (requires bitsandbytes).
+        quantization_config = None
+        if self.load_in_4bit or self.load_in_8bit:
+            try:
+                from transformers import BitsAndBytesConfig
+            except ImportError as exc:
+                raise ImportError(
+                    "4-bit/8-bit quantization requires the bitsandbytes package.\n"
+                    "Install it with:  pip install \"foretrieval[quantization]\"\n"
+                    "or:               uv add foretrieval --extra quantization"
+                ) from exc
+            if not is_cuda:
+                raise ValueError(
+                    "4-bit/8-bit quantization requires a CUDA device. "
+                    f"Current device: {self.device}"
+                )
+            _dtype_map = {
+                "float16": torch.float16,
+                "bfloat16": torch.bfloat16,
+                "float32": torch.float32,
+            }
+            compute_dtype = _dtype_map.get(self.bnb_4bit_compute_dtype, torch.float16)
+            quantization_config = BitsAndBytesConfig(
+                load_in_4bit=self.load_in_4bit,
+                load_in_8bit=self.load_in_8bit,
+                bnb_4bit_quant_type=self.bnb_4bit_quant_type,
+                bnb_4bit_compute_dtype=compute_dtype,
+            )
+
+        load_kwargs: Dict[str, Any] = dict(
             torch_dtype=torch.bfloat16,
             device_map=device_map,
             token=token,
+        )
+        if quantization_config is not None:
+            load_kwargs["quantization_config"] = quantization_config
+
+        self.model = model_cls.from_pretrained(
+            self.pretrained_model_name_or_path,
+            **load_kwargs,
         )
         self.processor = processor_cls.from_pretrained(
             self.pretrained_model_name_or_path,

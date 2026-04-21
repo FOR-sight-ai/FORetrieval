@@ -48,6 +48,11 @@ class MultiModalRetrieverModel:
         device: str = "cuda",
         verbose: int = 1,
         embedding_server: Optional[EmbeddingServerConfig] = None,
+        storage_qdrant: bool = True,
+        load_in_4bit: bool = False,
+        load_in_8bit: bool = False,
+        bnb_4bit_quant_type: str = "nf4",
+        bnb_4bit_compute_dtype: str = "float16",
     ):
         """Load a ColPali model from a pre-trained checkpoint.
 
@@ -59,6 +64,12 @@ class MultiModalRetrieverModel:
             verbose (int): Verbosity level. Default is 1.
             embedding_server (Optional[EmbeddingServerConfig]): If set, embeddings are computed
                 on the remote vLLM server instead of locally. Model weights are not loaded locally.
+            load_in_4bit (bool): Load model in 4-bit quantization via BitsAndBytes. Requires
+                foretrieval[quantization] and a CUDA device. Default False.
+            load_in_8bit (bool): Load model in 8-bit quantization via BitsAndBytes. Requires
+                foretrieval[quantization] and a CUDA device. Default False.
+            bnb_4bit_quant_type (str): 4-bit quantization type, "nf4" or "fp4". Default "nf4".
+            bnb_4bit_compute_dtype (str): Compute dtype for 4-bit quant, e.g. "float16". Default "float16".
 
         Returns:
             cls (MultiModalRetrieverModel): Initialised instance.
@@ -71,6 +82,11 @@ class MultiModalRetrieverModel:
             device=device,
             verbose=verbose,
             embedding_server=embedding_server,
+            storage_qdrant=storage_qdrant,
+            load_in_4bit=load_in_4bit,
+            load_in_8bit=load_in_8bit,
+            bnb_4bit_quant_type=bnb_4bit_quant_type,
+            bnb_4bit_compute_dtype=bnb_4bit_compute_dtype,
         )
         return instance
 

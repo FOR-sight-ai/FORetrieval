@@ -1,12 +1,17 @@
 """HTTP client for the remote vLLM embedding server.
 
-Communicates with a vLLM instance serving a ColPali/ColQwen3.5 model via the
-/pooling endpoint with task=token_embed.  Returns multi-vector embeddings as
-CPU tensors, matching the shape produced by the local colpali-engine pipeline.
+Communicates with a vLLM instance serving a ColQwen3/ColQwen3.5 model via the
+/pooling endpoint.  Returns multi-vector embeddings as CPU tensors, matching
+the shape produced by the local colpali-engine pipeline.
 
 OOM handling: the server may return HTTP 500 with an OOM message when a batch
 is too large.  The client detects this and retries with progressively halved
 batch sizes down to 1.
+
+Auth: when EmbeddingServerConfig.api_key is set, every request includes an
+"Authorization: Bearer <api_key>" header.  Deploy vLLM with --api-key to match.
+
+SSL: verify_ssl=False disables certificate verification (self-signed certs).
 """
 
 from __future__ import annotations
@@ -14,9 +19,9 @@ from __future__ import annotations
 import base64
 import io
 import logging
-from typing import List
+from typing import List, Optional
 
-import requests
+import httpx
 import torch
 from PIL import Image
 
@@ -51,7 +56,17 @@ class EmbeddingServerClient:
 
     def __init__(self, config: EmbeddingServerConfig) -> None:
         self.config = config
-        self._session = requests.Session()
+        self._client = httpx.Client(
+            verify=config.verify_ssl,
+            headers=self._build_headers(),
+            timeout=config.request_timeout,
+        )
+
+    def _build_headers(self) -> dict:
+        headers = {}
+        if self.config.api_key:
+            headers["Authorization"] = f"Bearer {self.config.api_key}"
+        return headers
 
     # ------------------------------------------------------------------
     # Public API
@@ -60,19 +75,16 @@ class EmbeddingServerClient:
     def health_check(self) -> bool:
         """Return True if the server is reachable and healthy."""
         try:
-            resp = self._session.get(
-                self.config.url + _HEALTH_ENDPOINT,
-                timeout=10,
-            )
+            resp = self._client.get(self.config.url + _HEALTH_ENDPOINT, timeout=10)
             return resp.status_code == 200
-        except requests.RequestException:
+        except httpx.HTTPError:
             return False
 
     def embed_images(self, images: List[Image.Image]) -> List[torch.Tensor]:
         """Embed a list of PIL images via the remote server.
 
-        Sends images in batches to /pooling (task=token_embed).  Automatically
-        reduces batch size on OOM until batch_size reaches 1.
+        Sends images in batches to /pooling.  Automatically reduces batch size
+        on OOM until batch_size reaches 1.
 
         Parameters
         ----------
@@ -108,6 +120,10 @@ class EmbeddingServerClient:
         if not data:
             raise ValueError("Server returned empty data for query embedding")
         return [torch.tensor(data[0]["data"], dtype=torch.float32)]
+
+    def close(self) -> None:
+        """Close the underlying HTTP client."""
+        self._client.close()
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -182,16 +198,15 @@ class EmbeddingServerClient:
     def _post_pooling(self, payload: dict) -> dict:
         """POST to /pooling and return parsed JSON.  Raises ServerOOMError on OOM."""
         try:
-            resp = self._session.post(
+            resp = self._client.post(
                 self.config.url + _POOLING_ENDPOINT,
                 json=payload,
-                timeout=self.config.request_timeout,
             )
-        except requests.Timeout as exc:
+        except httpx.TimeoutException as exc:
             raise TimeoutError(
                 f"Embedding server timed out after {self.config.request_timeout}s"
             ) from exc
-        except requests.ConnectionError as exc:
+        except httpx.HTTPError as exc:
             raise ConnectionError(
                 f"Cannot reach embedding server at {self.config.url}"
             ) from exc
