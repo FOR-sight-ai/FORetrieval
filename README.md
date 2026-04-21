@@ -16,8 +16,10 @@ Key features:
 uv sync
 
 # Optional extras:
-uv sync --extra qdrant    # Qdrant storage backend (recommended for large indexes)
-uv sync --extra docling   # Docling-based PDF chunking
+uv sync --extra qdrant          # Qdrant storage backend (recommended for large indexes)
+uv sync --extra docling         # Docling-based PDF chunking
+uv sync --extra embedding_server  # Remote vLLM embedding server (adds paramiko for auto-deploy)
+uv sync --extra quantization    # 4-bit / 8-bit local model quantization (adds bitsandbytes)
 ```
 
 ## Pre-requisites
@@ -280,6 +282,106 @@ pytest -m slow
 |--------|---------|
 | `slow` | GPU-dependent or computationally expensive |
 | `integration` | Requires a live API key or Ollama daemon |
+
+## Remote embedding server
+
+FORetrieval can offload all embedding computation to a remote GPU server running [vLLM](https://docs.vllm.ai). The local machine only loads the processor (tokenizer + image preprocessor) — no model weights, no GPU required locally.
+
+**Requirements:**
+- vLLM ≥ 0.19.0 on the remote server
+- Only **ColQwen3 / ColQwen3.5** models are supported by the vLLM `/pooling` endpoint. ColPali, ColQwen2, and ColQwen2.5 are not supported.
+- Recommended model: `athrael-soju/colqwen3.5-4.5B-v3` (rank 3 on ViDoRe V3, 320-dim, Apache 2.0)
+
+### Quick start
+
+```python
+from foretrieval import MultiModalRetrieverModel
+from foretrieval.embedding_server import EmbeddingServerConfig
+
+cfg = EmbeddingServerConfig(
+    url="http://gpu-server:8000",
+    model_name="athrael-soju/colqwen3.5-4.5B-v3",
+)
+
+model = MultiModalRetrieverModel.from_pretrained(
+    "athrael-soju/colqwen3.5-4.5B-v3",
+    index_root="my_indexes",
+    embedding_server=cfg,
+)
+model.index("path/to/docs/", index_name="my_index")
+results = model.search("maximum altitude", k=3)
+```
+
+### Auto-deploy
+
+Set `auto_deploy=True` to have FORetrieval SSH to the GPU server and start the vLLM Docker container automatically if it is not already running. Requires `foretrieval[embedding_server]` (adds `paramiko`).
+
+```python
+cfg = EmbeddingServerConfig(
+    url="http://gpu-server:8000",
+    model_name="athrael-soju/colqwen3.5-4.5B-v3",
+    auto_deploy=True,
+    ssh_host="gpu-server",       # SSH target
+    ssh_user="myuser",           # optional, defaults to $USER
+    n_gpus=-1,                   # -1 = all available GPUs (auto-detected via nvidia-smi)
+)
+```
+
+The manager pulls `vllm/vllm-openai:latest`, starts the container with `--tensor-parallel-size N`, and writes a metadata file at `~/.foretrieval/deployment.json` on the remote. Subsequent calls detect the running container and skip redeployment.
+
+### Authentication and SSL
+
+```python
+cfg = EmbeddingServerConfig(
+    url="https://gpu-server:8000",
+    model_name="athrael-soju/colqwen3.5-4.5B-v3",
+    api_key="my-secret-token",   # Authorization: Bearer header
+    verify_ssl=False,            # for self-signed certificates
+)
+```
+
+Deploy vLLM with `--api-key my-secret-token` to require authentication.
+
+### SSH tunnel (firewalled servers)
+
+If port 8000 is not directly reachable, open an SSH tunnel first:
+
+```bash
+ssh -fNL 8000:localhost:8000 gpu-server
+```
+
+Then use `http://localhost:8000` as the URL.
+
+### EmbeddingServerConfig reference
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `url` | required | Base URL of the vLLM server |
+| `model_name` | required | HuggingFace model ID (must contain `colqwen3`) |
+| `auto_deploy` | `false` | SSH + Docker auto-deploy |
+| `ssh_host` | `None` | SSH hostname (required when `auto_deploy=True`) |
+| `ssh_user` | `None` | SSH username (defaults to `$USER`) |
+| `ssh_key_path` | `None` | Path to SSH private key (defaults to SSH agent) |
+| `n_gpus` | `-1` | Number of GPUs (`-1` = all available) |
+| `port` | `8000` | Port exposed on the remote server |
+| `hf_token` | `None` | HuggingFace token for gated models |
+| `api_key` | `None` | Bearer token for server authentication |
+| `verify_ssl` | `True` | Verify SSL certificates |
+| `batch_size` | `4` | Images per request (auto-halved on OOM) |
+| `request_timeout` | `120` | HTTP timeout in seconds |
+
+## Local model quantization
+
+For local (non-remote) inference, 4-bit and 8-bit quantization reduce VRAM usage via [BitsAndBytes](https://github.com/TimDettmers/bitsandbytes). Requires `foretrieval[quantization]` and a CUDA device.
+
+```python
+model = MultiModalRetrieverModel.from_pretrained(
+    "vidore/colqwen2.5-v0.2",
+    load_in_4bit=True,                  # or load_in_8bit=True
+    bnb_4bit_quant_type="nf4",          # "nf4" (default) or "fp4"
+    bnb_4bit_compute_dtype="float16",   # compute dtype
+)
+```
 
 ## Acknowledgements
 
