@@ -355,11 +355,13 @@ class ColPaliModel:
             self.resize_stored_images = index_config.get("resize_stored_images", False)
             self.max_image_width = index_config.get("max_image_width", None)
             self.max_image_height = index_config.get("max_image_height", None)
+            self.index_description = index_config.get("description", "")
         else:
             self.full_document_collection = False
             self.resize_stored_images = False
             self.max_image_width = None
             self.max_image_height = None
+            self.index_description = ""
 
         self._load_local_sidecars(index_path)
 
