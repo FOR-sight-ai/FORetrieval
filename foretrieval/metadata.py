@@ -252,6 +252,72 @@ def _build_model_from_cfg(ai_cfg: Dict[str, Any]):
         raise ValueError(f"Unknown provider: {provider_raw}")
 
 
+def generate_index_description(
+    doc_metadata: Dict[int, Dict[str, Any]],
+    ai_cfg: Optional[Dict[str, Any]],
+) -> str:
+    """Generate a global description of an index from per-document AI metadata.
+
+    Collects ``short_description`` fields from ``doc_metadata``, deduplicates
+    them, then asks the LLM to write a concise corpus-level summary.  Returns
+    an empty string when ``ai_cfg`` is ``None`` or no descriptions are available
+    (caller should treat empty string as "no description").
+
+    Args:
+        doc_metadata: Mapping of doc_id → metadata dict (as stored in the index).
+        ai_cfg: Same provider config dict used by ``ai_metadata_provider_factory``.
+                Pass ``None`` to skip LLM generation.
+
+    Returns:
+        A 1–3 sentence corpus description, or ``""`` on failure / no AI config.
+    """
+    if not ai_cfg:
+        return ""
+
+    descriptions = [
+        md["short_description"]
+        for md in doc_metadata.values()
+        if md.get("short_description")
+    ]
+    if not descriptions:
+        return ""
+
+    try:
+        model = _build_model_from_cfg(ai_cfg)
+
+        class IndexSummary(BaseModel):
+            description: str = Field(
+                description="1–3 sentence summary of the document corpus"
+            )
+
+        agent = Agent(
+            model=model,
+            instructions=(
+                "You are a librarian. Given short descriptions of individual documents "
+                "in a collection, write a concise 1–3 sentence summary that describes "
+                "the overall corpus: its domain, topics, and document types."
+            ),
+            output_type=IndexSummary,
+            model_settings={"temperature": 0, "tools": []},
+        )
+
+        doc_list = "\n".join(f"- {d}" for d in descriptions)
+        user_prompt = (
+            f"Here are the individual document descriptions ({len(descriptions)} documents):\n"
+            f"{doc_list}\n\n"
+            "Write a global description for this document collection."
+        )
+
+        try:
+            result = agent.run_sync(user_prompt)
+        except AttributeError:
+            result = asyncio.run(agent.run_sync(user_prompt))
+
+        return result.output.description or ""
+    except Exception:
+        return ""
+
+
 def ai_metadata_provider_factory(
     ai_cfg: Optional[Dict[str, Any]],
 ) -> Callable[[Path], Dict[str, Any]]:

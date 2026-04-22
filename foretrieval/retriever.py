@@ -136,6 +136,8 @@ class MultiModalRetrieverModel:
         ] = None,
         max_image_width: Optional[int] = None,
         max_image_height: Optional[int] = None,
+        description: str = "",
+        ai_cfg: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
         """Build an index from input documents.
@@ -146,9 +148,13 @@ class MultiModalRetrieverModel:
             doc_ids (Optional[List[Union[str, int]]]): List of document IDs.
             store_collection_with_index (bool): Whether to store the collection with the index.
             overwrite (bool): Whether to overwrite an existing index with the same name.
-            metadata (Optional[Union[Dict[Union[str, int], Dict[str, Union[str, int]]], List[Dict[str, Union[str, int]]]]]):
-                Metadata for the documents. Can be a dictionary mapping doc_ids to metadata dictionaries,
-                or a list of metadata dictionaries (one for each document).
+            metadata (Optional[...]): Per-document metadata dicts.
+            description (str): Optional human-readable description of the corpus.
+                If empty and ``ai_cfg`` is provided, auto-generated from per-document
+                AI metadata ``short_description`` fields after indexing.
+            ai_cfg (Optional[Dict]): Provider config for the summary LLM (same format as
+                ``ai_metadata_provider_factory``).  Only used for auto-generation when
+                ``description`` is empty.
 
         Returns:
             None
@@ -162,6 +168,8 @@ class MultiModalRetrieverModel:
             metadata=metadata,
             max_image_width=max_image_width,
             max_image_height=max_image_height,
+            description=description,
+            ai_cfg=ai_cfg,
             **kwargs,
         )
 
@@ -222,6 +230,11 @@ class MultiModalRetrieverModel:
             batch_size,
             reindex_modified,
         )
+
+    @property
+    def index_description(self) -> str:
+        """Human-readable description of the indexed corpus (empty string if not set)."""
+        return getattr(self.model, "index_description", "")
 
     def fetch(self, result: Result) -> Result:
         """Fetch a result from the index."""
