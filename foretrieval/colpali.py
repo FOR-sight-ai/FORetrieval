@@ -996,6 +996,13 @@ class ColPaliModel:
             dim = int(embeddings_list[0].shape[-1])
             self._ensure_qdrant_collection(dim=dim)
 
+        if metadata is not None:
+            md_jsonable = (
+                metadata.as_jsonable() if isinstance(metadata, DocMetadata)
+                else (DocMetadata(**metadata).as_jsonable() if isinstance(metadata, dict) else metadata)
+            )
+            self.doc_id_to_metadata[int(doc_id)] = md_jsonable
+
         for i, (embedding, page_id, chunk_id) in enumerate(zip(embeddings_list, page_ids, chunk_ids)):
             if self.storage_qdrant:
                 if self.qdrant_client is None or self.qdrant_collection is None:
