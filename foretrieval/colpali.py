@@ -307,6 +307,7 @@ class ColPaliModel:
         self.resize_stored_images = index_config.get("resize_stored_images", False)
         self.max_image_width = index_config.get("max_image_width", None)
         self.max_image_height = index_config.get("max_image_height", None)
+        self.index_description = index_config.get("description", "")
 
         if self.full_document_collection:
             collection_path = index_path / "collection"
@@ -354,11 +355,13 @@ class ColPaliModel:
             self.resize_stored_images = index_config.get("resize_stored_images", False)
             self.max_image_width = index_config.get("max_image_width", None)
             self.max_image_height = index_config.get("max_image_height", None)
+            self.index_description = index_config.get("description", "")
         else:
             self.full_document_collection = False
             self.resize_stored_images = False
             self.max_image_width = None
             self.max_image_height = None
+            self.index_description = ""
 
         self._load_local_sidecars(index_path)
 
@@ -487,15 +490,24 @@ class ColPaliModel:
             embedding_server=embedding_server,
             **kwargs,
         )
-
+        instance.index_description = index_config.get("description", "")
         return instance
 
-    def _export_index(self):
+    def _export_index(self, description: str = ""):
         if self.index_name is None:
             raise ValueError("No index name specified. Cannot export.")
 
         index_path = Path(self.index_root) / self.index_name
         index_path.mkdir(parents=True, exist_ok=True)
+
+        # Preserve existing description on incremental updates when none is supplied
+        if not description:
+            cfg_path = index_path / "index_config.json.gz"
+            if cfg_path.exists():
+                try:
+                    description = srsly.read_gzip_json(cfg_path).get("description", "")
+                except Exception:
+                    pass
 
         index_config = {
             "model_name": self.model_name,
@@ -509,6 +521,7 @@ class ColPaliModel:
             "library_version": VERSION,
             "storage_backend": "qdrant" if self.storage_qdrant else "local",
             "qdrant_collection": self.qdrant_collection if self.storage_qdrant else None,
+            "description": description,
         }
         srsly.write_gzip_json(index_path / "index_config.json.gz", index_config)
 
@@ -556,6 +569,8 @@ class ColPaliModel:
         max_image_width: Optional[int] = None,
         max_image_height: Optional[int] = None,
         batch_size: int = 1,
+        description: str = "",
+        ai_cfg: Optional[Dict[str, Any]] = None,
     ) -> Union[Dict[int, str], None]:
         if (
             self.index_name is not None
@@ -658,7 +673,12 @@ class ColPaliModel:
             )
             # self.doc_ids_to_file_names[doc_id] = str(input_path)
 
-        self._export_index()
+        # Auto-generate index description from per-doc AI metadata when available
+        if not description and ai_cfg and self.doc_id_to_metadata:
+            from .metadata import generate_index_description
+            description = generate_index_description(self.doc_id_to_metadata, ai_cfg)
+
+        self._export_index(description=description)
         if self.highest_doc_id == -1:
             logger.warning("No documents were indexed.")
 
@@ -977,6 +997,13 @@ class ColPaliModel:
         if self.storage_qdrant:
             dim = int(embeddings_list[0].shape[-1])
             self._ensure_qdrant_collection(dim=dim)
+
+        if metadata is not None:
+            md_jsonable = (
+                metadata.as_jsonable() if isinstance(metadata, DocMetadata)
+                else (DocMetadata(**metadata).as_jsonable() if isinstance(metadata, dict) else metadata)
+            )
+            self.doc_id_to_metadata[int(doc_id)] = md_jsonable
 
         for i, (embedding, page_id, chunk_id) in enumerate(zip(embeddings_list, page_ids, chunk_ids)):
             if self.storage_qdrant:
