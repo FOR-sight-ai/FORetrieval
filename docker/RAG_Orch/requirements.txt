@@ -1,0 +1,8 @@
+fastapi
+httpx
+pillow
+pymilvus==2.6.11
+pymupdf
+python-multipart
+qdrant-client
+uvicorn[standard]
