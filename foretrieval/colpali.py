@@ -199,7 +199,10 @@ class ColPaliModel:
     def _load_model_and_processor(self):
         token = self.kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN")
         is_cuda = self.device == "cuda" or (isinstance(self.device, torch.device) and self.device.type == "cuda")
-        device_map = "cuda" if is_cuda else None
+        # Use "cuda:0" so each subprocess loads onto a single GPU (the first one
+        # visible via CUDA_VISIBLE_DEVICES) rather than letting Accelerate spread
+        # layers across all visible GPUs, which causes OOM in parallel runs.
+        device_map = "cuda:0" if is_cuda else None
 
         model_cls, processor_cls = self._resolve_model_and_processor_classes()
 
