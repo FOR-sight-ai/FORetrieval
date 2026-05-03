@@ -1,0 +1,15 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: ${QDRANT_CONTAINER_NAME:-rag-db}
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - ${QDRANT_STORAGE_PATH:-./storage}:/qdrant/storage
+    networks:
+      - rag-network
+
+networks:
+  rag-network:
+    external: true
