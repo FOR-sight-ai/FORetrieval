@@ -222,57 +222,78 @@ class TestEmptyFilterReturnsEmptyList:
         return model
 
     def test_filter_no_match_returns_empty_list(self):
-        """_search_local returns [] when filter_embeddings yields nothing."""
-        from foretrieval.colpali import ColPaliModel
+        """LocalVectorStore.search() returns [] when the metadata filter matches nothing."""
+        from foretrieval.vector_store.local import LocalVectorStore
+        from foretrieval.vector_store.base import MultiVectorQuery, StoredPoint, make_point_id
+        import torch
+        from unittest.mock import MagicMock
 
-        mock = self._make_mock_colpali()
-        mock.filter_embeddings = MagicMock(return_value=([], []))
+        store = LocalVectorStore()
 
-        # Call _search_local directly — bypasses the search() dispatcher
-        results = ColPaliModel._search_local(
-            mock,
-            qs=[MagicMock()],
-            k=5,
-            filter_metadata={"ext": ".docx"},
-            return_base64_results=False,
-        )
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as tmp:
+            store.open("idx", pathlib.Path(tmp), create=True)
+            store.set_doc_id_to_metadata({0: {"stem": "datasheet", "ext": ".pdf"}})
+            # Insert one embedding
+            store.upsert([StoredPoint(
+                point_id=make_point_id(0, 1),
+                vector=torch.rand(4, 8),
+                payload={"doc_id": 0, "page_id": 1, "chunk_id": None, "metadata": {}},
+            )])
+            proc = MagicMock()
+            store.set_processor(proc)
 
+            # Filter on language=fr which doesn't match → empty result
+            q = MultiVectorQuery(vectors=torch.rand(2, 8), filter_metadata={"language": "fr"})
+            results = store.search(q, k=5)
         assert results == []
 
     def test_filter_no_match_does_not_raise(self):
-        """_search_local must not raise ValueError when filter matches nothing."""
-        from foretrieval.colpali import ColPaliModel
+        """search() must not raise ValueError when filter matches nothing."""
+        from foretrieval.vector_store.local import LocalVectorStore
+        from foretrieval.vector_store.base import MultiVectorQuery, StoredPoint, make_point_id
+        import torch
+        from unittest.mock import MagicMock
 
-        mock = self._make_mock_colpali()
-        mock.filter_embeddings = MagicMock(return_value=([], []))
-
-        try:
-            ColPaliModel._search_local(
-                mock,
-                qs=[MagicMock()],
-                k=5,
-                filter_metadata={"ext": ".docx"},
-                return_base64_results=False,
-            )
-        except ValueError as exc:
-            pytest.fail(
-                f"_search_local raised ValueError when filter matched nothing: {exc}"
-            )
+        store = LocalVectorStore()
+        import tempfile, pathlib
+        with tempfile.TemporaryDirectory() as tmp:
+            store.open("idx", pathlib.Path(tmp), create=True)
+            store.set_doc_id_to_metadata({0: {"ext": ".pdf"}})
+            store.upsert([StoredPoint(
+                point_id=make_point_id(0, 1),
+                vector=torch.rand(4, 8),
+                payload={"doc_id": 0, "page_id": 1, "chunk_id": None, "metadata": {}},
+            )])
+            proc = MagicMock()
+            store.set_processor(proc)
+            q = MultiVectorQuery(vectors=torch.rand(2, 8), filter_metadata={"language": "fr"})
+            try:
+                store.search(q, k=5)
+            except ValueError as exc:
+                pytest.fail(f"search raised ValueError when filter matched nothing: {exc}")
 
     def test_filter_match_still_works(self):
-        """search() still returns results when the filter matches documents.
-
-        With the new architecture, _search_local is called as a real method
-        which handles scoring. We verify no crash and a list is returned.
-        """
+        """search() returns results when the filter matches documents."""
         from foretrieval.colpali import ColPaliModel
+        from unittest.mock import MagicMock
+        from foretrieval.vector_store.base import SearchHit
+        from foretrieval.objects import Result
 
-        mock = self._make_mock_colpali()
-        embedding = MagicMock()
-        mock.filter_embeddings = MagicMock(return_value=([embedding], [0]))
-        mock._search_local = MagicMock(return_value=[])  # mock the local search path
+        mock = MagicMock()
+        mock.collection = {}
+        mock.enable_heatmaps = False
+        mock.enable_circle = False
+        mock.doc_id_to_metadata = {0: {"ext": ".pdf"}}
+        mock._encode_search_query = MagicMock(return_value=[MagicMock()])
+
+        hit = SearchHit(point_id=0, score=0.9, payload={"doc_id": 0, "page_id": 1, "chunk_id": None, "metadata": {}})
+        mock.vector_store.search.return_value = [hit]
         mock.embed_id_to_extra = {}
-        mock.collection = None
+        # Make _hits_to_results and _finalize_results return proper values
+        expected = [Result(doc_id=0, page_num=1, score=0.9)]
+        mock._hits_to_results = MagicMock(return_value=expected)
+        mock._finalize_results = MagicMock(return_value=expected)
 
         results = ColPaliModel.search(
             mock,
@@ -281,6 +302,5 @@ class TestEmptyFilterReturnsEmptyList:
             filter_metadata={"ext": ".pdf"},
             return_base64_results=False,
         )
-
-        # Should not crash; _search_local is mocked to return []
         assert isinstance(results, list)
+        assert len(results) > 0

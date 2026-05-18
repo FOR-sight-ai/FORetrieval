@@ -48,7 +48,11 @@ class MultiModalRetrieverModel:
         device: str = "cuda",
         verbose: int = 1,
         embedding_server: Optional[EmbeddingServerConfig] = None,
-        storage_qdrant: bool = True,
+        # New: generic backend selection
+        storage_backend: str = "local",
+        storage_config: Optional[Dict[str, Any]] = None,
+        # Deprecated: use storage_backend="qdrant" instead
+        storage_qdrant: Optional[bool] = None,
         load_in_4bit: bool = False,
         load_in_8bit: bool = False,
         bnb_4bit_quant_type: str = "nf4",
@@ -64,6 +68,11 @@ class MultiModalRetrieverModel:
             verbose (int): Verbosity level. Default is 1.
             embedding_server (Optional[EmbeddingServerConfig]): If set, embeddings are computed
                 on the remote vLLM server instead of locally. Model weights are not loaded locally.
+            storage_backend (str): Vector storage backend. One of "local", "qdrant", "milvus".
+                Default is "local".
+            storage_config (Optional[Dict]): Backend-specific configuration dict.
+                For Milvus: {"candidate_limit": 64}.
+            storage_qdrant (bool): Deprecated. Use storage_backend="qdrant" instead.
             load_in_4bit (bool): Load model in 4-bit quantization via BitsAndBytes. Requires
                 foretrieval[quantization] and a CUDA device. Default False.
             load_in_8bit (bool): Load model in 8-bit quantization via BitsAndBytes. Requires
@@ -82,6 +91,8 @@ class MultiModalRetrieverModel:
             device=device,
             verbose=verbose,
             embedding_server=embedding_server,
+            storage_backend=storage_backend,
+            storage_config=storage_config,
             storage_qdrant=storage_qdrant,
             load_in_4bit=load_in_4bit,
             load_in_8bit=load_in_8bit,
@@ -98,14 +109,18 @@ class MultiModalRetrieverModel:
         device: str = "cuda",
         verbose: int = 1,
         embedding_server: Optional[EmbeddingServerConfig] = None,
+        storage_config: Optional[Dict[str, Any]] = None,
     ):
         """Load an index and the associated model from disk.
 
         Parameters:
             index_path (Union[str, Path]): Path to the index.
+            index_root (str): Root directory where the index lives. Default ".rag_index".
             device (str): The device to load the model on. Default is "cuda".
             embedding_server (Optional[EmbeddingServerConfig]): If set, embeddings are computed
                 on the remote vLLM server instead of locally.
+            storage_config (Optional[Dict]): Backend-specific overrides (e.g. Milvus candidate_limit).
+                The storage_backend is read from the saved index_config.json.gz automatically.
 
         Returns:
             cls (MultiModalRetrieverModel): Initialised instance with index loaded.
@@ -118,6 +133,7 @@ class MultiModalRetrieverModel:
             device=device,
             verbose=verbose,
             embedding_server=embedding_server,
+            storage_config=storage_config,
         )
         return instance
 
