@@ -285,3 +285,116 @@ class TestIndexConfigStorageBackend:
 
         cfg = srsly.read_gzip_json(tmp_path / "test_export_milvus" / "index_config.json.gz")
         assert cfg["storage_backend"] == "milvus"
+
+
+# ---------------------------------------------------------------------------
+# Remote backend dispatch and colpali integration
+# ---------------------------------------------------------------------------
+
+class TestRemoteBackendDispatch:
+    """Verify RemoteVectorStore is selected and ColPaliModel integrates correctly."""
+
+    def _make_remote_model(self, url="http://localhost:18000"):
+        from unittest.mock import patch as _patch
+        with _patch("foretrieval.vector_db_server.client.VectorDBServerClient") as MockClient:
+            mock_client_inst = MagicMock()
+            mock_client_inst.open_collection.return_value = {
+                "opened": True, "backend": "qdrant", "created": True
+            }
+            MockClient.return_value = mock_client_inst
+            model = _make_model(
+                "remote",
+                storage_config={"url": url, "backend": "qdrant"},
+            )
+        return model, mock_client_inst
+
+    def test_remote_backend_selects_remote_store(self):
+        from foretrieval.vector_store.remote import RemoteVectorStore
+        model, _ = self._make_remote_model()
+        assert isinstance(model.vector_store, RemoteVectorStore)
+
+    def test_vector_store_is_open_remote(self):
+        """_vector_store_is_open returns True after open() is called."""
+        from foretrieval.colpali import ColPaliModel
+        model, mock_client = self._make_remote_model()
+        # Simulate open() having been called (set _opened flag)
+        model.vector_store._opened = True
+        assert model._vector_store_is_open() is True
+
+    def test_vector_store_is_not_open_before_open(self):
+        from foretrieval.colpali import ColPaliModel
+        model, _ = self._make_remote_model()
+        model.vector_store._opened = False
+        assert model._vector_store_is_open() is False
+
+    def test_set_processor_not_called_for_remote(self):
+        """set_processor is a local-only hook — must not be called for remote."""
+        from foretrieval.vector_store.remote import RemoteVectorStore
+        model, _ = self._make_remote_model()
+        assert isinstance(model.vector_store, RemoteVectorStore)
+        # RemoteVectorStore has no set_processor attribute
+        assert not hasattr(model.vector_store, "set_processor")
+
+    def test_export_index_writes_remote_backend(self, tmp_path):
+        import srsly
+        model, _ = self._make_remote_model()
+        model.index_root = str(tmp_path)
+        model.index_name = "test_export_remote"
+        model.doc_id_to_metadata = {}
+        model.doc_ids_to_file_names = {}
+        model.embed_id_to_extra = {}
+        model.full_document_collection = False
+        model.max_image_width = None
+        model.max_image_height = None
+        model.highest_doc_id = -1
+        model.model_name = "vidore/colpali-v1.2"
+        # storage_config set on model (url present, no api_key)
+        model.storage_config = {"url": "http://localhost:18000", "backend": "qdrant"}
+
+        model.vector_store = MagicMock()
+        model._export_index()
+
+        cfg = srsly.read_gzip_json(
+            tmp_path / "test_export_remote" / "index_config.json.gz"
+        )
+        assert cfg["storage_backend"] == "remote"
+        # api_key must NOT be in persisted storage_config
+        persisted = cfg.get("storage_config") or {}
+        assert "api_key" not in persisted
+
+    def test_export_index_strips_api_key(self, tmp_path):
+        import srsly
+        model, _ = self._make_remote_model()
+        model.index_root = str(tmp_path)
+        model.index_name = "test_strip_key"
+        model.doc_id_to_metadata = {}
+        model.doc_ids_to_file_names = {}
+        model.embed_id_to_extra = {}
+        model.full_document_collection = False
+        model.max_image_width = None
+        model.max_image_height = None
+        model.highest_doc_id = -1
+        model.model_name = "vidore/colpali-v1.2"
+        model.storage_config = {
+            "url": "http://localhost:18000",
+            "backend": "qdrant",
+            "api_key": "supersecret",
+        }
+
+        model.vector_store = MagicMock()
+        model._export_index()
+
+        cfg = srsly.read_gzip_json(
+            tmp_path / "test_strip_key" / "index_config.json.gz"
+        )
+        persisted = cfg.get("storage_config") or {}
+        assert "api_key" not in persisted
+        assert persisted.get("url") == "http://localhost:18000"
+
+    def test_indexed_embeddings_returns_empty_for_remote(self):
+        model, _ = self._make_remote_model()
+        assert model.indexed_embeddings == []
+
+    def test_embed_id_to_doc_id_returns_empty_for_remote(self):
+        model, _ = self._make_remote_model()
+        assert model.embed_id_to_doc_id == {}

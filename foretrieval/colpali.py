@@ -413,6 +413,16 @@ class ColPaliModel:
         index_config: dict = srsly.read_gzip_json(index_path / "index_config.json.gz")
         storage_backend = index_config.get("storage_backend", "local")
 
+        # For the remote backend, merge on-disk storage_config (URL, backend, …)
+        # with caller-supplied storage_config (api_key, etc.).  Caller wins on
+        # overlap so that credentials can be injected at load time without
+        # modifying the on-disk index.
+        disk_storage_config = index_config.get("storage_config") or {}
+        if disk_storage_config and storage_backend == "remote":
+            merged_storage_config = {**disk_storage_config, **(storage_config or {})}
+        else:
+            merged_storage_config = storage_config
+
         instance = cls(
             pretrained_model_name_or_path=index_config["model_name"],
             n_gpu=n_gpu,
@@ -422,7 +432,7 @@ class ColPaliModel:
             index_root=str(index_path.parent),
             device=device,
             storage_backend=storage_backend,
-            storage_config=storage_config,
+            storage_config=merged_storage_config,
             embedding_server=embedding_server,
             **kwargs,
         )
@@ -445,6 +455,17 @@ class ColPaliModel:
                 except Exception:
                     pass
 
+        # For the remote backend, persist the storage_config so from_index()
+        # can reconstruct the client.  Sensitive fields (api_key) are stripped
+        # and must be re-supplied by the caller at load time.
+        persisted_storage_config: Optional[Dict[str, Any]] = None
+        if self.storage_backend == "remote" and self.storage_config:
+            persisted_storage_config = {
+                k: v
+                for k, v in self.storage_config.items()
+                if k != "api_key"
+            }
+
         index_config = {
             "model_name": self.model_name,
             "full_document_collection": self.full_document_collection,
@@ -456,6 +477,7 @@ class ColPaliModel:
             "max_image_height": self.max_image_height,
             "library_version": VERSION,
             "storage_backend": self.storage_backend,
+            "storage_config": persisted_storage_config,
             "description": description,
         }
         srsly.write_gzip_json(index_path / "index_config.json.gz", index_config)
@@ -1412,12 +1434,15 @@ class ColPaliModel:
         """Return True if the vector store has an active client connection."""
         from .vector_store.qdrant import QdrantVectorStore
         from .vector_store.milvus import MilvusVectorStore
+        from .vector_store.remote import RemoteVectorStore
         if isinstance(self.vector_store, LocalVectorStore):
             return self.vector_store._index_name is not None
         if isinstance(self.vector_store, QdrantVectorStore):
             return self.vector_store._client is not None
         if isinstance(self.vector_store, MilvusVectorStore):
             return self.vector_store._client is not None
+        if isinstance(self.vector_store, RemoteVectorStore):
+            return self.vector_store.is_opened
         return False
 
     # ============================================================
