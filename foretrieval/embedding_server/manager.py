@@ -31,6 +31,13 @@ _CONTAINER_NAME = "foretrieval_embedding_server"
 # vLLM Docker image.
 _VLLM_IMAGE = "vllm/vllm-openai:latest"
 
+# Port vLLM listens on *inside* the container.
+# vLLM always binds to 8000 internally; this is not configurable without
+# rebuilding the image.  EmbeddingServerConfig.port controls only the
+# *host-side* binding (left-hand side of Docker's -p HOST:CONTAINER mapping),
+# allowing callers to expose the service on any host port.
+_CONTAINER_INTERNAL_PORT = 8000
+
 
 class EmbeddingServerManager:
     """Manages deployment of the vLLM embedding server via SSH + Docker.
@@ -157,7 +164,9 @@ class EmbeddingServerManager:
             f"docker run -d "
             f"--name {_CONTAINER_NAME} "
             f"{gpu_flag} "
-            f"-p {cfg.port}:8000 "
+            # cfg.port  → host port (configurable, chosen by the caller)
+            # _CONTAINER_INTERNAL_PORT → container port (fixed by vLLM image)
+            f"-p {cfg.port}:{_CONTAINER_INTERNAL_PORT} "
             f"{' '.join(env_parts)} "
             f"{' '.join(vol_parts)} "
             f"--restart unless-stopped "

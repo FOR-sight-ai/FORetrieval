@@ -34,6 +34,13 @@ _REMOTE_BUILD_DIR = "~/foretrieval_db_build"
 _CONTAINER_NAME = "foretrieval_vector_db_server"
 _IMAGE_NAME = "foretrieval-vector-db:local"
 
+# Port the server listens on *inside* the container.
+# This is fixed by the Dockerfile CMD / server_main.py and is always 18000.
+# VectorDBServerConfig.port controls only the *host-side* binding
+# (the left-hand side of Docker's -p HOST:CONTAINER mapping), allowing
+# callers to expose the service on any host port without rebuilding the image.
+_CONTAINER_INTERNAL_PORT = 18000
+
 
 class VectorDBServerManager:
     """Manages deployment of the FORetrieval vector-DB server via SSH + Docker.
@@ -142,7 +149,10 @@ class VectorDBServerManager:
         cfg = self.config
         env_parts = [
             f"-e FOR_DB_DATA_DIR=/data",
-            f"-e FOR_DB_PORT=18000",
+            # FOR_DB_PORT sets the port the server listens on inside the container.
+            # This must always match _CONTAINER_INTERNAL_PORT — not cfg.port, which
+            # is the host-side binding.  cfg.port is used below in -p HOST:CONTAINER.
+            f"-e FOR_DB_PORT={_CONTAINER_INTERNAL_PORT}",
         ]
         if cfg.api_key:
             env_parts.append(f"-e FOR_DB_API_KEY={cfg.api_key}")
@@ -150,7 +160,9 @@ class VectorDBServerManager:
         return (
             f"docker run -d "
             f"--name {_CONTAINER_NAME} "
-            f"-p {cfg.port}:18000 "
+            # cfg.port  → host port (configurable, chosen by the caller)
+            # _CONTAINER_INTERNAL_PORT → container port (fixed by the image)
+            f"-p {cfg.port}:{_CONTAINER_INTERNAL_PORT} "
             f"-v {cfg.data_dir}:/data "
             f"{' '.join(env_parts)} "
             f"--restart unless-stopped "

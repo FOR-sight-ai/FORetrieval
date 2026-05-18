@@ -21,8 +21,8 @@ class TestURLValidation:
         assert cfg.url == "http://db-host:18000"
 
     def test_url_preserved_without_trailing_slash(self):
-        cfg = _make_cfg(url="http://pf01:18000")
-        assert cfg.url == "http://pf01:18000"
+        cfg = _make_cfg(url="http://db-host:18000")
+        assert cfg.url == "http://db-host:18000"
 
 
 class TestBackendValidation:
