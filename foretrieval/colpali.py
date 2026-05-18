@@ -2,6 +2,7 @@ import base64
 import io
 import logging
 import os
+import warnings
 from pathlib import Path
 import shutil
 import srsly
@@ -24,22 +25,6 @@ from PIL import Image
 import torch
 
 try:
-    from qdrant_client import QdrantClient
-    from qdrant_client.models import (
-        Distance,
-        FieldCondition,
-        Filter,
-        MatchValue,
-        MultiVectorComparator,
-        MultiVectorConfig,
-        PointStruct,
-        VectorParams,
-    )
-    _QDRANT_AVAILABLE = True
-except ImportError:
-    _QDRANT_AVAILABLE = False
-
-try:
     from .docling_ingest import chunk_pdf_to_images
     _DOCLING_AVAILABLE = True
 except ImportError:
@@ -50,6 +35,16 @@ from .models_metadata import DocMetadata, MetadataFilter
 from .objects import Result
 from .plot_utils import draw_circle_on_max_patch, pil_from_base64, pil_to_base64_png, compute_patch_heatmap, majority_token_id, build_heatmap_overlays_base64
 from .utils import _value_match
+from .vector_store import (
+    LocalVectorStore,
+    MultiVectorQuery,
+    SearchHit,
+    StoredPoint,
+    make_point_id,
+    make_vector_store,
+)
+from .vector_store.qdrant import _QDRANT_AVAILABLE
+from .vector_store.milvus import _MILVUS_AVAILABLE
 
 VERSION = "0.0.1"
 
@@ -57,10 +52,16 @@ VERSION = "0.0.1"
 logger = logging.getLogger(__name__)
 
 
-# ColPaliModel supports two storage backends:
+# ColPaliModel supports three storage backends:
 # - local backend: embeddings and mappings are stored in local files
-# - Qdrant backend: embeddings are stored in Qdrant, while local sidecar files
-#   are still used for metadata, image caches, and heatmap-related tensors
+# - qdrant backend: embeddings are stored in Qdrant (embedded), local sidecar files
+#   still used for metadata, image caches, and heatmap-related tensors
+# - milvus backend: embeddings stored in Milvus Lite (two-collection layout),
+#   local sidecar files still used for metadata, image caches, and heatmap tensors
+#
+# All backends are accessed through the VectorStore interface defined in
+# foretrieval/vector_store/.  This keeps ColPaliModel backend-agnostic and
+# makes it easy to add a future remote-DB-server backend.
 #
 # The class is organized into:
 # 1. initialization and loading
@@ -85,7 +86,11 @@ class ColPaliModel:
         index_root: str = ".foretrieval",
         device: Optional[Union[str, torch.device]] = None,
         ingestion: Dict[str, Any] = {"backend": "default"},
-        storage_qdrant: bool = True,
+        # New unified backend selection
+        storage_backend: str = "local",
+        storage_config: Optional[Dict[str, Any]] = None,
+        # Deprecated: use storage_backend="qdrant" instead
+        storage_qdrant: Optional[bool] = None,
         embedding_server: Optional[EmbeddingServerConfig] = None,
         load_in_4bit: bool = False,
         load_in_8bit: bool = False,
@@ -109,7 +114,23 @@ class ColPaliModel:
         self.index_root = index_root
         self.index_name = index_name
         self.kwargs = kwargs
-        self.storage_qdrant = storage_qdrant
+
+        # Handle deprecated storage_qdrant boolean
+        if storage_qdrant is not None:
+            warnings.warn(
+                "The 'storage_qdrant' parameter is deprecated and will be removed in a "
+                "future release. Use storage_backend='qdrant' (or 'local') instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            storage_backend = "qdrant" if storage_qdrant else "local"
+
+        self.storage_backend = storage_backend.strip().lower()
+        self.storage_config = storage_config or {}
+
+        # Expose storage_qdrant as a read-only property for backward compatibility
+        # (existing code that reads self.storage_qdrant still works)
+        self._storage_qdrant_compat = (self.storage_backend == "qdrant")
 
         self.ingestion = ingestion
         self.ingestion_backend = (self.ingestion.get("backend") or "default").lower()
@@ -135,27 +156,26 @@ class ColPaliModel:
         self.doc_ids_to_file_names = {}
         self.doc_ids = set()
 
-        # local backend only
-        self.indexed_embeddings = []
-        self.embed_id_to_doc_id = {}
-
         self.enable_heatmaps = False
         self.enable_circle = False
         self.SOURCE_EXTS = {".doc", ".docx", ".rtf", ".odt", ".ppt", ".pptx", ".odp", ".xls", ".xlsx", ".ods", ".txt", ".md", ".csv", ".json", ".yaml", ".yml", ".epub", ".html"}
         self.IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif"}
 
-        self.qdrant_client = None
-        self.qdrant_collection = index_name
-        self.qdrant_path = None
-
-        if self.storage_qdrant and self.index_name is not None:
-            self.qdrant_path = Path(self.index_root) / self.index_name / "qdrant"
-            self.qdrant_client = QdrantClient(path=str(self.qdrant_path))
-
         self.docling_dir = None
         if self.index_name is not None and self.ingestion_backend == "docling":
             self.docling_dir = Path(index_root) / self.index_name / "docling_chunks"
             self.docling_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- VectorStore ---
+        self.vector_store = make_vector_store(self.storage_backend, self.storage_config)
+        if self.index_name is not None:
+            self.vector_store.open(
+                self.index_name,
+                Path(self.index_root),
+                create=(not load_from_index),
+            )
+            if isinstance(self.vector_store, LocalVectorStore):
+                self.vector_store.set_processor(None)  # set after model load
 
         # --- Remote embedding server ---
         self._remote_client: Optional[EmbeddingServerClient] = None
@@ -169,6 +189,10 @@ class ColPaliModel:
         else:
             self._load_model_and_processor()
 
+        # Inject processor into local store now that it is loaded
+        if isinstance(self.vector_store, LocalVectorStore) and hasattr(self, "processor"):
+            self.vector_store.set_processor(self.processor)
+
         if not load_from_index:
             self.full_document_collection = False
             self.resize_stored_images = False
@@ -177,6 +201,19 @@ class ColPaliModel:
             self.highest_doc_id = -1
         else:
             self._load_index_state()
+
+    # ------------------------------------------------------------------
+    # Backward-compatibility property
+    # ------------------------------------------------------------------
+
+    @property
+    def storage_qdrant(self) -> bool:
+        """Deprecated compat property — use self.storage_backend instead."""
+        return self._storage_qdrant_compat
+
+    @storage_qdrant.setter
+    def storage_qdrant(self, value: bool) -> None:
+        self._storage_qdrant_compat = value
 
     def _resolve_model_and_processor_classes(self):
         """Return (model_cls, processor_cls) for the configured model name."""
@@ -199,14 +236,10 @@ class ColPaliModel:
     def _load_model_and_processor(self):
         token = self.kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN")
         is_cuda = self.device == "cuda" or (isinstance(self.device, torch.device) and self.device.type == "cuda")
-        # Use "cuda:0" so each subprocess loads onto a single GPU (the first one
-        # visible via CUDA_VISIBLE_DEVICES) rather than letting Accelerate spread
-        # layers across all visible GPUs, which causes OOM in parallel runs.
         device_map = "cuda:0" if is_cuda else None
 
         model_cls, processor_cls = self._resolve_model_and_processor_classes()
 
-        # Build quantization config if requested (requires bitsandbytes).
         quantization_config = None
         if self.load_in_4bit or self.load_in_8bit:
             try:
@@ -257,28 +290,51 @@ class ColPaliModel:
             self.model = self.model.to(self.device)
 
     def _load_processor_only(self):
-        """Load only the processor (no model weights) for remote embedding mode.
-
-        The processor handles image preprocessing and query tokenisation on the
-        client side, which is needed to build heatmap sidecars and encode queries
-        for the /pooling endpoint.  No GPU memory is consumed.
-        """
+        """Load only the processor (no model weights) for remote embedding mode."""
         token = self.kwargs.get("hf_token", None) or os.environ.get("HF_TOKEN")
         _, processor_cls = self._resolve_model_and_processor_classes()
         self.processor = processor_cls.from_pretrained(
             self.pretrained_model_name_or_path,
             token=token,
         )
-        self.model = None  # explicitly not loaded
+        self.model = None
 
     def _load_index_state(self):
         if self.index_name is None:
             raise ValueError("No index name specified. Cannot load from index.")
 
-        if self.storage_qdrant:
-            self._load_qdrant_state()
-        else:
-            self._load_local_index()
+        index_path = Path(self.index_root) / self.index_name
+        index_config_path = index_path / "index_config.json.gz"
+        index_config: dict = srsly.read_gzip_json(index_config_path)
+        self.full_document_collection = index_config.get("full_document_collection", False)
+        self.resize_stored_images = index_config.get("resize_stored_images", False)
+        self.max_image_width = index_config.get("max_image_width", None)
+        self.max_image_height = index_config.get("max_image_height", None)
+        self.index_description = index_config.get("description", "")
+
+        if self.full_document_collection:
+            collection_path = index_path / "collection"
+            json_files = sorted(
+                collection_path.glob("*.json.gz"),
+                key=lambda x: int(x.stem.split(".")[0]),
+            )
+            for json_file in json_files:
+                loaded_data = srsly.read_gzip_json(json_file)
+                self.collection.update({int(k): v for k, v in loaded_data.items()})
+
+        # Load sidecar files (metadata, filenames, extras)
+        self._load_local_sidecars(index_path)
+
+        # Load vector store sidecar (embeddings for local; nothing for qdrant/milvus)
+        self.vector_store.load_sidecar(index_path)
+
+        # Inject metadata map and processor into local store
+        if isinstance(self.vector_store, LocalVectorStore):
+            self.vector_store.set_processor(self.processor)
+            self.vector_store.set_doc_id_to_metadata(self.doc_id_to_metadata)
+
+        self.highest_doc_id = max(self.doc_id_to_metadata.keys(), default=-1)
+        self.doc_ids = set(self.doc_id_to_metadata.keys())
 
     def _load_local_sidecars(self, index_path: Path):
         extra_path = index_path / "embed_id_to_extra.pt"
@@ -301,137 +357,6 @@ class ColPaliModel:
             self.doc_id_to_metadata = {int(k): v for k, v in self.doc_id_to_metadata.items()}
         else:
             self.doc_id_to_metadata = {}
-            
-    def _load_local_index(self):
-        index_path = Path(self.index_root) / self.index_name
-
-        index_config = srsly.read_gzip_json(index_path / "index_config.json.gz")
-        self.full_document_collection = index_config.get("full_document_collection", False)
-        self.resize_stored_images = index_config.get("resize_stored_images", False)
-        self.max_image_width = index_config.get("max_image_width", None)
-        self.max_image_height = index_config.get("max_image_height", None)
-        self.index_description = index_config.get("description", "")
-
-        if self.full_document_collection:
-            collection_path = index_path / "collection"
-            json_files = sorted(
-                collection_path.glob("*.json.gz"),
-                key=lambda x: int(x.stem.split(".")[0]),
-            )
-            for json_file in json_files:
-                loaded_data = srsly.read_gzip_json(json_file)
-                self.collection.update({int(k): v for k, v in loaded_data.items()})
-
-        embeddings_path = index_path / "embeddings"
-        embedding_files = sorted(
-            embeddings_path.glob("embeddings_*.pt"),
-            key=lambda x: int(x.stem.split("_")[1]),
-        )
-        self.indexed_embeddings = []
-        for file in embedding_files:
-            self.indexed_embeddings.extend(torch.load(file, map_location="cpu"))
-
-        self.embed_id_to_doc_id = srsly.read_gzip_json(index_path / "embed_id_to_doc_id.json.gz")
-        self.embed_id_to_doc_id = {int(k): v for k, v in self.embed_id_to_doc_id.items()}
-
-        self._load_local_sidecars(index_path)
-
-    def _load_qdrant_state(self):
-        self._ensure_qdrant_client()
-        if self.qdrant_client is None:
-            raise ValueError("Qdrant client is not initialized.")
-
-        assert self.index_name is not None
-        self.qdrant_collection = self.index_name
-
-        if not self.qdrant_client.collection_exists(self.qdrant_collection):
-            raise ValueError(
-                f"Qdrant collection '{self.qdrant_collection}' does not exist."
-            )
-
-        index_path = Path(self.index_root) / self.index_name
-
-        index_config_path = index_path / "index_config.json.gz"
-        if index_config_path.exists():
-            index_config = srsly.read_gzip_json(index_config_path)
-            self.full_document_collection = index_config.get("full_document_collection", False)
-            self.resize_stored_images = index_config.get("resize_stored_images", False)
-            self.max_image_width = index_config.get("max_image_width", None)
-            self.max_image_height = index_config.get("max_image_height", None)
-            self.index_description = index_config.get("description", "")
-        else:
-            self.full_document_collection = False
-            self.resize_stored_images = False
-            self.max_image_width = None
-            self.max_image_height = None
-            self.index_description = ""
-
-        self._load_local_sidecars(index_path)
-
-        self.highest_doc_id = max(self.doc_id_to_metadata.keys(), default=-1)
-        self.doc_ids = set(self.doc_id_to_metadata.keys())
-
-    def _ensure_qdrant_client(self):
-        if not self.storage_qdrant:
-            return
-
-        if not _QDRANT_AVAILABLE:
-            raise RuntimeError(
-                "The Qdrant storage backend requires the qdrant-client package.\n"
-                "Install it with:  pip install \"foretrieval[qdrant]\"\n"
-                "or:               uv add foretrieval --extra qdrant"
-            )
-
-        if self.index_name is None:
-            raise ValueError("index_name must be set before initializing Qdrant.")
-
-        if self.qdrant_client is None:
-            self.qdrant_path = Path(self.index_root) / self.index_name / "qdrant"
-            self.qdrant_client = QdrantClient(path=str(self.qdrant_path))
-            
-    def _ensure_qdrant_collection(self, dim: Optional[int] = None):
-        if not self.storage_qdrant:
-            return
-
-        self._ensure_qdrant_client()
-        
-        if self.qdrant_client is None:
-            raise ValueError("Qdrant client is not initialized.")
-
-        if self.index_name is None:
-            raise ValueError("index_name must be set before creating Qdrant collection.")
-
-        self.qdrant_collection = self.index_name
-
-        if self.qdrant_client.collection_exists(self.qdrant_collection):
-            return
-
-        if dim is None:
-            raise ValueError("Qdrant collection does not exist yet and no vector dimension was provided.")
-
-        self._create_qdrant_collection(self.qdrant_collection, dim)
-
-    def _create_qdrant_collection(self, collection_name: str, dim: int):
-        if self.qdrant_client is None:
-            raise ValueError("Qdrant client is not initialized.")
-
-        if self.qdrant_client.collection_exists(collection_name):
-            return
-
-        self.qdrant_client.create_collection(
-            collection_name=collection_name,
-            vectors_config=VectorParams(
-                size=dim,
-                distance=Distance.COSINE,
-                multivector_config=MultiVectorConfig(
-                    comparator=MultiVectorComparator.MAX_SIM
-                ),
-            ),
-        )
-
-    def _make_point_id(self, doc_id: int, page_id: int, chunk_id: Optional[int] = None) -> int:
-        chunk_val = 0 if chunk_id is None else int(chunk_id)
-        return int(doc_id) * 10_000_000 + int(page_id) * 10_000 + chunk_val
 
     def set_enable_heatmaps_and_circle(self, enable_heatmaps: bool, enable_circle: bool):
         self.enable_heatmaps = enable_heatmaps
@@ -451,6 +376,10 @@ class ColPaliModel:
         device: Optional[Union[str, torch.device]] = None,
         index_root: str = ".foretrieval",
         embedding_server: Optional[EmbeddingServerConfig] = None,
+        storage_backend: str = "local",
+        storage_config: Optional[Dict[str, Any]] = None,
+        # Deprecated
+        storage_qdrant: Optional[bool] = None,
         **kwargs,
     ):
         return cls(
@@ -462,6 +391,9 @@ class ColPaliModel:
             index_root=index_root,
             device=device,
             embedding_server=embedding_server,
+            storage_backend=storage_backend,
+            storage_config=storage_config,
+            storage_qdrant=storage_qdrant,
             **kwargs,
         )
 
@@ -474,12 +406,12 @@ class ColPaliModel:
         device: Optional[Union[str, torch.device]] = None,
         index_root: str = ".foretrieval",
         embedding_server: Optional[EmbeddingServerConfig] = None,
+        storage_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
         index_path = Path(os.path.join(Path(index_root), Path(index_path)))
         index_config: dict = srsly.read_gzip_json(index_path / "index_config.json.gz")
         storage_backend = index_config.get("storage_backend", "local")
-        storage_qdrant = storage_backend == "qdrant"
 
         instance = cls(
             pretrained_model_name_or_path=index_config["model_name"],
@@ -489,7 +421,8 @@ class ColPaliModel:
             load_from_index=True,
             index_root=str(index_path.parent),
             device=device,
-            storage_qdrant=storage_qdrant,
+            storage_backend=storage_backend,
+            storage_config=storage_config,
             embedding_server=embedding_server,
             **kwargs,
         )
@@ -522,13 +455,12 @@ class ColPaliModel:
             "max_image_width": self.max_image_width,
             "max_image_height": self.max_image_height,
             "library_version": VERSION,
-            "storage_backend": "qdrant" if self.storage_qdrant else "local",
-            "qdrant_collection": self.qdrant_collection if self.storage_qdrant else None,
+            "storage_backend": self.storage_backend,
             "description": description,
         }
         srsly.write_gzip_json(index_path / "index_config.json.gz", index_config)
 
-        # local-only sidecars still useful in both modes
+        # Shared sidecar files
         torch.save(self.embed_id_to_extra, index_path / "embed_id_to_extra.pt")
         srsly.write_gzip_json(index_path / "doc_ids_to_file_names.json.gz", self.doc_ids_to_file_names)
         srsly.write_gzip_json(index_path / "metadata.json.gz", self.doc_id_to_metadata)
@@ -540,19 +472,8 @@ class ColPaliModel:
                 chunk = dict(list(self.collection.items())[i : i + 500])
                 srsly.write_gzip_json(collection_path / f"{i}.json.gz", chunk)
 
-        if not self.storage_qdrant:
-            embeddings_path = index_path / "embeddings"
-            embeddings_path.mkdir(exist_ok=True)
-            num_embeddings = len(self.indexed_embeddings)
-            chunk_size = 500
-            for i in range(0, num_embeddings, chunk_size):
-                chunk = self.indexed_embeddings[i : i + chunk_size]
-                torch.save(chunk, embeddings_path / f"embeddings_{i}.pt")
-
-            srsly.write_gzip_json(
-                index_path / "embed_id_to_doc_id.json.gz",
-                self.embed_id_to_doc_id,
-            )
+        # Delegate vector persistence to the backend
+        self.vector_store.export_sidecar(index_path)
 
         if self.verbose > 0:
             print(f"Index exported to {index_path}")
@@ -610,9 +531,16 @@ class ColPaliModel:
         if store_collection_with_index:
             self.full_document_collection = True
         self.index_name = index_name
-        if self.storage_qdrant:
-            self.qdrant_collection = self.index_name
-            self._ensure_qdrant_client()
+
+        # Open / create vector store for the new index
+        self.vector_store.open(
+            index_name,
+            Path(self.index_root),
+            create=True,
+        )
+        if isinstance(self.vector_store, LocalVectorStore):
+            self.vector_store.set_processor(self.processor)
+            self.vector_store.set_doc_id_to_metadata(self.doc_id_to_metadata)
 
         self.max_image_width = max_image_width
         self.max_image_height = max_image_height
@@ -622,11 +550,6 @@ class ColPaliModel:
             self.highest_doc_id = -1
 
         if input_path.is_dir():
-            # Sort by filename so the ordering is deterministic and consistent
-            # with build_metadata_list_for_dir(), which also sorts by p.name.
-            # Without this, two independent iterdir() calls on the same
-            # directory can return different orderings, silently misaligning
-            # a metadata list with the wrong documents.
             items = sorted(input_path.iterdir(), key=lambda p: p.name)
             if doc_ids is not None and len(doc_ids) != len(items):
                 raise ValueError(
@@ -643,7 +566,7 @@ class ColPaliModel:
                 if metadata is None:
                     doc_md = None
                 elif isinstance(metadata, list):
-                    doc_md = metadata[i]  # align list on items
+                    doc_md = metadata[i]
                 elif isinstance(metadata, dict):
                     doc_md = metadata.get(doc_id)
                 else:
@@ -674,7 +597,6 @@ class ColPaliModel:
                 doc_id=doc_id,
                 metadata=doc_metadata,
             )
-            # self.doc_ids_to_file_names[doc_id] = str(input_path)
 
         # Auto-generate index description from per-doc AI metadata when available
         if not description and ai_cfg and self.doc_id_to_metadata:
@@ -701,6 +623,20 @@ class ColPaliModel:
             )
         if not hasattr(self, "highest_doc_id"):
             self.highest_doc_id = -1
+
+        # Ensure vector store is open for this index.
+        # We check if the client is initialised (not whether the collection exists),
+        # to avoid re-opening when the collection was just opened but not yet populated.
+        if not self._vector_store_is_open():
+            self.vector_store.open(
+                self.index_name,
+                Path(self.index_root),
+                create=True,
+            )
+            if isinstance(self.vector_store, LocalVectorStore):
+                self.vector_store.set_processor(self.processor)
+                self.vector_store.set_doc_id_to_metadata(self.doc_id_to_metadata)
+
         # Convert single inputs to lists for uniform processing
         if isinstance(input_item, (str, Path)) and Path(input_item).is_dir():
             input_items = list(Path(input_item).iterdir())
@@ -715,13 +651,11 @@ class ColPaliModel:
             else (doc_id if doc_id is not None else None)
         )
 
-        # Validate input lengths
         if doc_ids and len(doc_ids) != len(input_items):
             raise ValueError(
                 f"Number of doc_ids ({len(doc_ids)}) does not match number of input items ({len(input_items)})"
             )
 
-        # Process each input item
         for i, item in enumerate(input_items):
             current_doc_id = doc_ids[i] if doc_ids else self.highest_doc_id + 1 + i
             current_metadata = metadata if metadata else None
@@ -751,7 +685,6 @@ class ColPaliModel:
                         current_metadata,
                         batch_size,
                     )
-                     # store the path for later use
                     if stored_path is None:
                         self.doc_ids_to_file_names[current_doc_id] = "In-memory Image"
                     else:
@@ -805,7 +738,6 @@ class ColPaliModel:
             # 0) docling chunking (if enabled)
             if self.ingestion_backend == "docling":
 
-                # 0) Convert to PDF if not already a PDF (or a PDF mirror)
                 if ext == ".pdf":
                     pdf_file = item.resolve()
                 else:
@@ -813,20 +745,17 @@ class ColPaliModel:
                     if existing_pdf is not None:
                         pdf_file = existing_pdf
                     else:
-                        # 2) otherwise convert it
                         pdf_file = _convert_to_pdf(item)
                         if pdf_file is None:
                             logger.warning(f"Docling ingestion: failed to convert {item} to PDF. Skipping.")
-                            return None  # skip
+                            return None
 
-                # 1) Sauvegarder les chunks Docling sur disque
                 if self.docling_dir is None:
                     assert self.index_name is not None, "index_name must be set to use docling ingestion"
                     self.docling_dir = Path(self.index_root) / self.index_name / "docling_chunks"
                     self.docling_dir.mkdir(parents=True, exist_ok=True)
                 chunks = chunk_pdf_to_images(pdf_file, output_dir=self.docling_dir)
 
-                # 2) indexer
                 for i in range(0, len(chunks), batch_size):
                     batch_chunks, batch_page_ids, batch_chunk_ids = [], [], []
                     for j in range(i, min(i + batch_size, len(chunks))):
@@ -845,15 +774,12 @@ class ColPaliModel:
                     )
 
                 return Path(pdf_file).resolve()
-            # if docling fails => fallback to default below
 
-            # 1) images disque : pas docling
             elif ext in [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif"]:
                 image = Image.open(item)
                 self._add_to_index(image, store_collection_with_index, doc_id, metadata=metadata)
-                return item.resolve()  # <--- disk image path
+                return item.resolve()
 
-            # 2) default (code existant) : pdf / convert_to_pdf / pdf2image
             elif ext == ".pdf":
                 pdf_file = item.resolve()
 
@@ -879,17 +805,14 @@ class ColPaliModel:
                             metadata=metadata,
                         )
                 return pdf_file
-            # Si c'est une image, on l'indexe directement sans conversion (ne passe pas par Docling)
             else:
-                # 1) if a valid twin PDF already exists → use it
                 existing_pdf = self._find_existing_pdf(item)
                 if existing_pdf is not None:
                     pdf_file = existing_pdf
                 else:
-                    # 2) otherwise convert it
                     pdf_file = _convert_to_pdf(item)
                     if pdf_file is None:
-                        return None  # skip
+                        return None
 
                 with tempfile.TemporaryDirectory() as path:
                     images = convert_from_path(
@@ -916,7 +839,7 @@ class ColPaliModel:
 
         elif isinstance(item, Image.Image):
             self._add_to_index(item, store_collection_with_index, doc_id, metadata=metadata)
-            return None  # in-memory
+            return None
         else:
             raise ValueError(f"Unsupported input type: {type(item)}")
 
@@ -933,58 +856,39 @@ class ColPaliModel:
         if isinstance(images, Image.Image):
             images = [images]
 
-        # Convert single page_id to list for uniform processing
         if isinstance(page_ids, int):
             page_ids = [page_ids]
 
-        # Convert chunk_ids to list if needed
         if chunk_ids is None:
             chunk_ids = [None] * len(images)
         elif isinstance(chunk_ids, int):
             chunk_ids = [chunk_ids]
 
-        # Validate input lengths
         if len(images) != len(page_ids):
             raise ValueError(f"Number of images ({len(images)}) does not match number of page_ids ({len(page_ids)})")
         if len(images) != len(chunk_ids):
             raise ValueError(f"Number of images ({len(images)}) does not match number of chunk_ids ({len(chunk_ids)})")
 
-        # Check for existing entries (by chunk if exist (docling) or page)
-        if not self.storage_qdrant:
-            if any(c is not None for c in chunk_ids):
-                for chunk_id in chunk_ids:
-                    if chunk_id is None:
-                        continue
-                    if any(
-                        entry["doc_id"] == doc_id and entry.get("chunk_id") == chunk_id
-                        for entry in self.embed_id_to_doc_id.values()
-                    ):
-                        raise ValueError(f"Document ID {doc_id} with chunk ID {chunk_id} already exists in the index")
-            else:
-                for page_id in page_ids:
-                    if any(
-                        entry["doc_id"] == doc_id and entry["page_id"] == page_id
-                        for entry in self.embed_id_to_doc_id.values()
-                    ):
-                        raise ValueError(f"Document ID {doc_id} with page ID {page_id} already exists in the index")
+        # Check for existing entries
+        for page_id, chunk_id in zip(page_ids, chunk_ids):
+            pid = make_point_id(int(doc_id), int(page_id), int(chunk_id) if chunk_id is not None else None)
+            if self.vector_store.point_exists(pid):
+                if chunk_id is not None:
+                    raise ValueError(f"Document ID {doc_id} with chunk ID {chunk_id} already exists in the index")
+                raise ValueError(f"Document ID {doc_id} with page ID {page_id} already exists in the index")
 
-        # Process images locally (CPU) for heatmap sidecars — always needed
-        # regardless of whether embeddings are computed locally or remotely.
+        # Process images locally (CPU) for heatmap sidecars
         processed_images = self.processor.process_images(images)
-
-        # Sidecar data for heatmap visualisation (CPU tensors).
         input_ids_cpu = processed_images["input_ids"].detach().cpu()
         grid_cpu = processed_images.get("image_grid_thw")
         if grid_cpu is not None:
             grid_cpu = grid_cpu.detach().cpu()
-        orig_sizes = [img.size for img in images]  # (W,H) PIL
+        orig_sizes = [img.size for img in images]
 
-        # Generate embeddings — remote or local path.
+        # Generate embeddings — remote or local path
         if self._remote_client is not None:
-            # Remote: send images to vLLM server, get multi-vector tensors back.
             embeddings_list = self._remote_client.embed_images(images)
         else:
-            # Local: run model on GPU.
             with torch.inference_mode():
                 processed_images_gpu = {
                     k: v.to(self.device).to(
@@ -997,91 +901,55 @@ class ColPaliModel:
                 embeddings = self.model(**processed_images_gpu)
             embeddings_list = list(torch.unbind(embeddings.to("cpu")))
 
-        if self.storage_qdrant:
-            dim = int(embeddings_list[0].shape[-1])
-            self._ensure_qdrant_collection(dim=dim)
+        # Determine dim for lazy collection creation
+        dim = int(embeddings_list[0].shape[-1])
+        if not self.vector_store.collection_exists():
+            self.vector_store.create_collection(dim)
 
+        # Store metadata
         if metadata is not None:
             md_jsonable = (
                 metadata.as_jsonable() if isinstance(metadata, DocMetadata)
                 else (DocMetadata(**metadata).as_jsonable() if isinstance(metadata, dict) else metadata)
             )
             self.doc_id_to_metadata[int(doc_id)] = md_jsonable
+            if isinstance(self.vector_store, LocalVectorStore):
+                self.vector_store.set_doc_id_to_metadata(self.doc_id_to_metadata)
 
+        # Build StoredPoints and upsert
+        points_to_upsert = []
         for i, (embedding, page_id, chunk_id) in enumerate(zip(embeddings_list, page_ids, chunk_ids)):
-            if self.storage_qdrant:
-                if self.qdrant_client is None or self.qdrant_collection is None:
-                    raise ValueError("Qdrant is not initialized correctly.")
+            pid = make_point_id(int(doc_id), int(page_id), int(chunk_id) if chunk_id is not None else None)
 
-                # --- check existence ---
-                point_id = self._make_point_id(
-                    int(doc_id),
-                    int(page_id),
-                    int(chunk_id) if chunk_id is not None else None,
-                )
-                found = self.qdrant_client.retrieve(
-                    collection_name=self.qdrant_collection,
-                    ids=[point_id],
-                    with_payload=False,
-                    with_vectors=False,
-                )
-                if found:
-                    if chunk_id is not None:
-                        raise ValueError(f"Document ID {doc_id} with chunk ID {chunk_id} already exists")
-                    raise ValueError(f"Document ID {doc_id} with page ID {page_id} already exists")
+            payload = {
+                "doc_id": int(doc_id),
+                "page_id": int(page_id),
+                "chunk_id": int(chunk_id) if chunk_id is not None else None,
+                "metadata": (
+                    metadata.as_jsonable() if isinstance(metadata, DocMetadata)
+                    else (DocMetadata(**metadata).as_jsonable() if isinstance(metadata, dict) else {})
+                ) if metadata is not None else {},
+            }
 
-                # --- insertion ---
-                payload = {
-                    "doc_id": int(doc_id),
-                    "page_id": int(page_id),
-                    "chunk_id": int(chunk_id) if chunk_id is not None else None,
-                    "metadata": (
-                        metadata.as_jsonable() if isinstance(metadata, DocMetadata)
-                        else (DocMetadata(**metadata).as_jsonable() if isinstance(metadata, dict) else {})
-                    ),
-                }
+            points_to_upsert.append(StoredPoint(
+                point_id=pid,
+                vector=embedding.cpu(),
+                payload=payload,
+            ))
 
-                self.qdrant_client.upsert(
-                    collection_name=self.qdrant_collection,
-                    points=[
-                        PointStruct(
-                            id=point_id,
-                            vector=embedding.float().numpy().tolist(),
-                            payload=payload,
-                        )
-                    ],
-                )
+            # Heatmap sidecar
+            self.embed_id_to_extra[pid] = {
+                "input_ids": input_ids_cpu[i],
+                "image_grid_thw": grid_cpu[i] if grid_cpu is not None else None,
+                "orig_size": orig_sizes[i],
+            }
 
-                self.embed_id_to_extra[point_id] = {
-                    "input_ids": input_ids_cpu[i],
-                    "image_grid_thw": grid_cpu[i] if grid_cpu is not None else None,
-                    "orig_size": orig_sizes[i],
-                }
+            if store_collection_with_index:
+                img_str = self._post_process_image(images[i])
+                self.collection[int(pid)] = img_str
 
-                if store_collection_with_index:
-                    img_str = self._post_process_image(images[i])
-                    self.collection[int(point_id)] = img_str
-
-            else:
-                entry = {
-                    "doc_id": int(doc_id),
-                    "page_id": int(page_id),
-                }
-                if chunk_id is not None:
-                    entry["chunk_id"] = int(chunk_id)
-                embed_id = len(self.indexed_embeddings)
-                self.indexed_embeddings.append(embedding)
-                self.embed_id_to_doc_id[embed_id] = entry
-
-                self.embed_id_to_extra[embed_id] = {
-                    "input_ids": input_ids_cpu[i],
-                    "image_grid_thw": grid_cpu[i] if grid_cpu is not None else None,
-                    "orig_size": orig_sizes[i],
-                }
-
-                if store_collection_with_index:
-                    img_str = self._post_process_image(images[i])
-                    self.collection[int(embed_id)] = img_str
+        self.vector_store.upsert(points_to_upsert)
+        self.doc_ids.add(int(doc_id))
 
     # ============================================================
     # Index maintenance
@@ -1097,21 +965,12 @@ class ColPaliModel:
     ) -> Dict[int, str]:
         """
         Adds only NEW files from a folder to the current index.
-        - Ignores mirror PDFs if a source file with the same stem exists.
-        - Avoids duplicates by checking if the file (or its sibling PDF) is already indexed.
-        - If reindex_modified=True, also reindexes files whose modification date has changed
-        (compared to the stored canonical target). In this case, the old doc_id is removed
-        and the file is reindexed with a new doc_id.
-
-        metadata_provider: callable(Path) -> Optional[Dict[str, Union[str,int]]]
         """
         folder = Path(folder)
         assert folder.is_dir(), f"{folder} n'est pas un dossier existant."
 
-        # set of already known paths
         known = self._already_indexed_paths()
 
-        # inverse map to find a doc_id from a canonical path
         inverse_map: Dict[str, int] = {}
         for did, p in self.doc_ids_to_file_names.items():
             if p and p != "In-memory Image":
@@ -1125,27 +984,22 @@ class ColPaliModel:
 
         for item in sorted(folder.iterdir()):
             if item.is_dir():
-                # (optional) recursive descent if you want
                 continue
 
             ext = item.suffix.lower()
 
-            # 1) ignore mirror PDFs (if a source exists)
             if ext == ".pdf" and self._is_mirror_pdf(item):
                 if self.verbose > 1:
                     print(f"[skip] Mirror PDF ignored: {item}")
                 continue
 
-            # 2) avoid duplicates: path itself OR its sibling PDF already known?
             cand_keys = self._candidate_keys(item)
             if any(k in known for k in cand_keys) and not reindex_modified:
                 if self.verbose > 1:
                     print(f"[skip] Already indexed: {item}")
                 continue
 
-            # 3) reindex_modified handling
             if reindex_modified:
-                # if we find a known key, check mtime
                 target_key = None
                 for k in cand_keys:
                     if k in known:
@@ -1159,7 +1013,6 @@ class ColPaliModel:
                     except Exception:
                         src_stat, tgt_stat = None, None
 
-                    # reindex only if the src is newer
                     if (
                         src_stat is not None
                         and tgt_stat is not None
@@ -1169,20 +1022,14 @@ class ColPaliModel:
                             print(f"[skip] Unchanged (mtime): {item}")
                         continue
 
-                    # remove the old doc_id and (simply) replace it with a new one
                     old_doc_id = inverse_map.get(target_key)
                     if old_doc_id is not None:
                         if self.verbose > 0:
                             print(
                                 f"[update] Reindexing (modified): {item} (doc_id {old_doc_id})"
                             )
-                        # NB: no granular deletion API implemented;
-                        # the simplest is to add a new doc_id and, if needed,
-                        # mark the old one as obsolete via a metadata field or
-                        # maintain a 'tombstones' list. Here we just add a new one.
                         updated += 1
 
-            # 4) index this file (new or updated)
             doc_id = self.highest_doc_id + 1
             md = metadata_provider(item) if metadata_provider else None
             stored_path = self._process_and_add_to_index(
@@ -1201,7 +1048,6 @@ class ColPaliModel:
             self.highest_doc_id = max(self.highest_doc_id, doc_id)
             added += 1
 
-        # export to persist mappings
         self._export_index()
 
         if self.verbose > 0:
@@ -1218,10 +1064,8 @@ class ColPaliModel:
 
     def _encode_search_query(self, query: str):
         if self._remote_client is not None:
-            # Remote path: send query text to vLLM /pooling endpoint.
             return self._remote_client.embed_query(query)
 
-        # Local path: run model on GPU.
         with torch.inference_mode():
             batch_query = self.processor.process_queries([query])
             batch_query = {
@@ -1240,122 +1084,6 @@ class ColPaliModel:
         valid_idxs = [i for i, tok in enumerate(tokens) if tok not in {"<|endoftext|>", "Query", ":"}]
         return [qs[0][valid_idxs]]
 
-    def _search_local(
-        self,
-        qs,
-        k: int,
-        filter_metadata: Optional[Dict[str, str]],
-        return_base64_results: bool,
-    ) -> List[Result]:
-        k = min(k, len(self.indexed_embeddings))
-
-        if filter_metadata:
-            req_embeddings, req_embedding_ids = self.filter_embeddings(filter_metadata)
-            if not req_embeddings:
-                logger.warning(
-                    "Metadata filter matched no documents — returning empty results."
-                )
-                return []
-        else:
-            req_embeddings = self.indexed_embeddings
-            req_embedding_ids = list(range(len(self.indexed_embeddings)))
-
-        scores = self.processor.score(qs, req_embeddings, device=self.device).cpu().numpy()
-        top_pages = scores.argsort(axis=1)[0][-k:][::-1].tolist()
-
-        results: List[Result] = []
-        for embed_id in top_pages:
-            adjusted_embed_id = req_embedding_ids[embed_id]
-            doc_info = self.embed_id_to_doc_id[adjusted_embed_id]
-
-            result = Result(
-                doc_id=doc_info["doc_id"],
-                page_num=int(doc_info["page_id"]),
-                chunk_num=int(doc_info["chunk_id"]) if doc_info.get("chunk_id") is not None else None,
-                score=float(scores[0][embed_id]),
-                metadata=self.doc_id_to_metadata.get(int(doc_info["doc_id"]), {}),
-                base64=self.collection.get(adjusted_embed_id) if return_base64_results else None,
-            )
-
-            extra = self.embed_id_to_extra.get(adjusted_embed_id)
-            if (self.enable_heatmaps or self.enable_circle) and extra is not None:
-                result = self._attach_heatmaps_local(
-                    result=result,
-                    q_emb=qs[0],
-                    p_emb=self.indexed_embeddings[adjusted_embed_id],
-                    extra=extra,
-                    k=k,
-                )
-
-            results.append(result)
-
-        return self._finalize_results(results, return_base64_results)
-
-    def _search_qdrant(
-        self,
-        qs,
-        k: int,
-        filter_metadata: Optional[Dict[str, str]],
-        return_base64_results: bool,
-    ) -> List[Result]:
-        if self.qdrant_client is None:
-            raise ValueError("Qdrant client is not initialized.")
-        if self.qdrant_collection is None:
-            raise ValueError("Qdrant collection is not set.")
-
-        qfilter = self._build_qdrant_filter(filter_metadata)
-
-        response = self.qdrant_client.query_points(
-            collection_name=self.qdrant_collection,
-            query=qs[0].float().numpy().tolist(),
-            query_filter=qfilter,
-            limit=k,
-            with_payload=True,
-            with_vectors=False,
-        )
-
-        points = response.points if hasattr(response, "points") else response
-
-        results: List[Result] = []
-        for point in points:
-            payload = point.payload or {}
-            doc_id = int(payload["doc_id"])
-            page_id = int(payload["page_id"])
-            chunk_id = payload.get("chunk_id")
-
-            point_id = point.id
-
-            result = Result(
-                doc_id=doc_id,
-                page_num=page_id,
-                chunk_num=int(chunk_id) if chunk_id is not None else None,
-                score=float(point.score),
-                metadata=payload.get("metadata", self.doc_id_to_metadata.get(doc_id, {})),
-                base64=self.collection.get(point_id) if return_base64_results else None,
-            )
-
-            extra = self.embed_id_to_extra.get(point_id)
-            if (self.enable_heatmaps or self.enable_circle) and extra is not None:
-                retrieved = self.qdrant_client.retrieve(
-                    collection_name=self.qdrant_collection,
-                    ids=[point_id],
-                    with_payload=False,
-                    with_vectors=True,
-                )
-                if retrieved:
-                    p_emb = torch.tensor(retrieved[0].vector)
-                    result = self._attach_heatmaps_local(
-                        result=result,
-                        q_emb=qs[0],
-                        p_emb=p_emb,
-                        extra=extra,
-                        k=k,
-                    )
-
-            results.append(result)
-
-        return self._finalize_results(results, return_base64_results)
-
     def search(
         self,
         query: str,
@@ -1370,67 +1098,69 @@ class ColPaliModel:
         if k < 1:
             return []
 
-        if not self.storage_qdrant:
-            k = min(k, len(self.indexed_embeddings))
-
         qs = self._encode_search_query(query)
 
-        if self.storage_qdrant:
-            return self._search_qdrant(
-                qs=qs,
-                k=k,
-                filter_metadata=filter_metadata,
-                return_base64_results=return_base64_results,
-            )
-
-        return self._search_local(
-            qs=qs,
-            k=k,
+        mvq = MultiVectorQuery(
+            vectors=qs[0],
             filter_metadata=filter_metadata,
-            return_base64_results=return_base64_results,
         )
+        hits = self.vector_store.search(mvq, k)
 
-    def _build_qdrant_filter(self, filter_metadata: Optional[Dict[str, str]]):
-        if not filter_metadata:
-            return None
+        results = self._hits_to_results(hits, qs[0], k, return_base64_results)
+        return self._finalize_results(results, return_base64_results)
 
-        must = []
-        for key, value in filter_metadata.items():
-            must.append(
-                FieldCondition(
-                    key=f"metadata.{key}",
-                    match=MatchValue(value=value),
-                )
+    def _hits_to_results(
+        self,
+        hits: List[SearchHit],
+        q_emb: torch.Tensor,
+        k: int,
+        return_base64_results: bool,
+    ) -> List[Result]:
+        results: List[Result] = []
+        for hit in hits:
+            payload = hit.payload
+            doc_id = int(payload.get("doc_id", 0))
+            page_id = int(payload.get("page_id", 1))
+            chunk_id = payload.get("chunk_id")
+
+            result = Result(
+                doc_id=doc_id,
+                page_num=page_id,
+                chunk_num=int(chunk_id) if chunk_id is not None else None,
+                score=hit.score,
+                metadata=payload.get("metadata", self.doc_id_to_metadata.get(doc_id, {})),
+                base64=self.collection.get(hit.point_id) if return_base64_results else None,
             )
-        return Filter(must=must)
+
+            extra = self.embed_id_to_extra.get(hit.point_id)
+            if (self.enable_heatmaps or self.enable_circle) and extra is not None:
+                p_emb = self.vector_store.fetch_vector(hit.point_id)
+                if p_emb is not None:
+                    result = self._attach_heatmaps_local(
+                        result=result,
+                        q_emb=q_emb,
+                        p_emb=p_emb,
+                        extra=extra,
+                        k=k,
+                    )
+
+            results.append(result)
+
+        return results
 
     def filter_embeddings(self, filter_metadata: Union[Dict[str, Any], MetadataFilter]):
-        # support dict -> Pydantic model
+        """Legacy method kept for backward compat. Use search(filter_metadata=...) instead."""
+        if not isinstance(self.vector_store, LocalVectorStore):
+            raise NotImplementedError(
+                "filter_embeddings() is only supported for the local backend. "
+                "Use search(filter_metadata=...) for other backends."
+            )
         f = (
             filter_metadata
             if isinstance(filter_metadata, MetadataFilter)
             else MetadataFilter(**filter_metadata)
         )
-
-        req_doc_ids = []
-        for did, md in self.doc_id_to_metadata.items():
-            # md is stored as a JSONable dict
-            if _value_match(md, f):
-                req_doc_ids.append(int(did))
-
-        req_doc_ids = list(set(req_doc_ids))
-
-        req_embedding_ids = [
-            eid
-            for eid, doc in self.embed_id_to_doc_id.items()
-            if int(doc["doc_id"]) in req_doc_ids
-        ]
-        req_embeddings = [
-            ie
-            for idx, ie in enumerate(self.indexed_embeddings)
-            if idx in req_embedding_ids
-        ]
-        return req_embeddings, req_embedding_ids
+        return self.vector_store._filter_by_metadata(f)
 
     # ============================================================
     # Result enrichment and visualization
@@ -1532,11 +1262,10 @@ class ColPaliModel:
         doc_id = result.doc_id
         file_name = self.doc_ids_to_file_names.get(doc_id)
         if not file_name or file_name == "In-memory Image":
-            return result  # nothing to do
+            return result
 
         path = Path(file_name)
 
-        # --- NEW: DOCling chunk images (saved next to the index) ---
         if self.ingestion_backend == "docling":
             try:
                 if self.docling_dir is None:
@@ -1549,7 +1278,6 @@ class ColPaliModel:
                 image = Image.open(path_chunk)
                 result.base64 = self._post_process_image(image)
                 return result
-                # if not found: fall back to existing behaviour (pdf/image)
             except Exception as e:
                 if self.verbose > 0:
                     logger.warning(f"[fetch_result_img] Docling chunk fetch error: {e}")
@@ -1563,7 +1291,6 @@ class ColPaliModel:
                 return result
 
             if ext != ".pdf":
-                # BEFORE converting, check if a valid paired PDF already exists
                 sibling_pdf = self._find_existing_pdf(path)
                 if sibling_pdf is not None:
                     self.doc_ids_to_file_names[doc_id] = str(sibling_pdf)
@@ -1582,7 +1309,6 @@ class ColPaliModel:
                             )
                         return result
 
-            # PDF: extract the requested page
             with tempfile.TemporaryDirectory() as tmpdir:
                 images = convert_from_path(
                     str(path),
@@ -1602,7 +1328,6 @@ class ColPaliModel:
             return result
 
     def _post_process_image(self, image: Image.Image) -> str:
-        # Resize image while maintaining aspect ratio
         if self.max_image_width and self.max_image_height:
             img_width, img_height = image.size
             aspect_ratio = img_width / img_height
@@ -1648,7 +1373,6 @@ class ColPaliModel:
         return None
 
     def _already_indexed_paths(self) -> set:
-        """All already indexed 'canonical' targets (normalized paths)."""
         vals = set()
         for p in self.doc_ids_to_file_names.values():
             if not p or p == "In-memory Image":
@@ -1660,11 +1384,6 @@ class ColPaliModel:
         return vals
 
     def _candidate_keys(self, path: Path) -> List[str]:
-        """
-        Possible keys to check in the index to avoid duplicates:
-        - the path itself (resolved)
-        - its sibling PDF if it exists
-        """
         keys = []
         try:
             keys.append(str(path.resolve()))
@@ -1680,7 +1399,6 @@ class ColPaliModel:
         return keys
 
     def _is_mirror_pdf(self, path: Path) -> bool:
-        """True if path is .pdf and source file with the same *stem* exists."""
         if path.suffix.lower() != ".pdf":
             return False
         stem = path.with_suffix("")
@@ -1689,3 +1407,52 @@ class ColPaliModel:
             if Path(os.path.join(parent, f"{stem.name}{ext}")).exists():
                 return True
         return False
+
+    def _vector_store_is_open(self) -> bool:
+        """Return True if the vector store has an active client connection."""
+        from .vector_store.qdrant import QdrantVectorStore
+        from .vector_store.milvus import MilvusVectorStore
+        if isinstance(self.vector_store, LocalVectorStore):
+            return self.vector_store._index_name is not None
+        if isinstance(self.vector_store, QdrantVectorStore):
+            return self.vector_store._client is not None
+        if isinstance(self.vector_store, MilvusVectorStore):
+            return self.vector_store._client is not None
+        return False
+
+    # ============================================================
+    # Accessors for backward compat
+    # ============================================================
+
+    def get_doc_ids_to_file_names(self):
+        return self.doc_ids_to_file_names
+
+    @property
+    def indexed_embeddings(self):
+        """Backward-compat: return embedding list for local backend only."""
+        if isinstance(self.vector_store, LocalVectorStore):
+            return self.vector_store.indexed_embeddings
+        return []
+
+    @property
+    def embed_id_to_doc_id(self):
+        """Backward-compat: return embed_id mapping for local backend only."""
+        if isinstance(self.vector_store, LocalVectorStore):
+            return self.vector_store.embed_id_to_doc_id
+        return {}
+
+    @property
+    def qdrant_client(self):
+        """Backward-compat: expose qdrant client for tests that inspect it."""
+        from .vector_store.qdrant import QdrantVectorStore
+        if isinstance(self.vector_store, QdrantVectorStore):
+            return self.vector_store.client
+        return None
+
+    @property
+    def qdrant_collection(self):
+        """Backward-compat: expose qdrant collection name."""
+        from .vector_store.qdrant import QdrantVectorStore
+        if isinstance(self.vector_store, QdrantVectorStore):
+            return self.vector_store.collection_name
+        return None
