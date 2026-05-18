@@ -1,5 +1,5 @@
 """
-Smoke test: index toy_data/smartcockpit with all three backends using pf01 embedding server,
+Smoke test: index toy_data/smartcockpit with all three backends using a remote embedding server,
 then run one query and compare top-1 results.
 
 Usage:

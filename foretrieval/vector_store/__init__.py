@@ -11,6 +11,7 @@ Public API:
     LocalVectorStore    — in-memory + .pt/.json.gz file backend
     QdrantVectorStore   — embedded Qdrant (local path) backend
     MilvusVectorStore   — Milvus Lite two-collection backend
+    RemoteVectorStore   — HTTP client to a remote vector-DB server
 """
 
 from .base import (
@@ -23,6 +24,7 @@ from .base import (
 from .local import LocalVectorStore
 from .qdrant import QdrantVectorStore
 from .milvus import MilvusVectorStore
+from .remote import RemoteVectorStore
 from .factory import make_vector_store, BACKEND_REGISTRY
 
 __all__ = [
@@ -36,4 +38,5 @@ __all__ = [
     "LocalVectorStore",
     "QdrantVectorStore",
     "MilvusVectorStore",
+    "RemoteVectorStore",
 ]

@@ -74,25 +74,50 @@ for r in results:
 
 ## Storage backends
 
-FORetrieval supports two backends for storing embeddings:
+FORetrieval supports four backends for storing and searching embeddings:
 
-| Backend | Constructor flag | Description |
-|---------|-----------------|-------------|
-| **Qdrant** (default) | `storage_qdrant=True` | Embeddings stored in a local embedded Qdrant database under `<index_root>/<index_name>/qdrant/`. Does not load all embeddings into RAM. Requires `foretrieval[qdrant]`. |
-| **Local** | `storage_qdrant=False` | Embeddings saved as `.pt` files, loaded into memory at search time. No extra dependency. |
+| Backend | `storage_backend` value | Dep | Scoring | Typical use |
+|---------|------------------------|-----|---------|-------------|
+| **Local** | `"local"` | — | Exact MAX_SIM (in-RAM) | Development, small corpora |
+| **Qdrant** (default) | `"qdrant"` | `foretrieval[qdrant]` | Exact MAX_SIM (native) | Large local indexes, best accuracy |
+| **Milvus** | `"milvus"` | `foretrieval[milvus]` | Approximate (mean-pool ANN + late-interaction rerank) | Milvus ecosystem |
+| **Remote** | `"remote"` | httpx (core dep) | Delegated to server | GPU/network-separated deployments |
 
-When loading an existing index with `from_index()`, the backend is read automatically from the saved `index_config.json.gz` — no manual flag needed.
+The backend is fixed when an index is first created. It cannot be changed without recreating the index.
 
 ```python
-# Create with Qdrant backend
-model = MultiModalRetrieverModel.from_pretrained(..., storage_qdrant=True)
+# Local (in-memory .pt files)
+model = MultiModalRetrieverModel.from_pretrained(..., storage_backend="local")
 
-# Create with local backend
-model = MultiModalRetrieverModel.from_pretrained(..., storage_qdrant=False)
+# Qdrant (embedded, on-disk)
+model = MultiModalRetrieverModel.from_pretrained(..., storage_backend="qdrant")
 
-# Load existing index — backend auto-detected
-model = MultiModalRetrieverModel.from_index(index_path="my_index", index_root=".")
+# Milvus Lite (file-based)
+model = MultiModalRetrieverModel.from_pretrained(..., storage_backend="milvus")
+
+# Remote server (server holds collections; local machine stays stateless)
+from foretrieval.vector_db_server import VectorDBServerConfig
+
+model = MultiModalRetrieverModel.from_pretrained(
+    "athrael-soju/colqwen3.5-4.5B-v3",
+    storage_backend="remote",
+    storage_config={
+        "url": "http://gpu-server:18000",
+        "backend": "qdrant",   # server-side backend
+    },
+)
+
+# Load existing index — backend and server URL auto-read from index_config.json.gz
+# api_key must be re-supplied at load time (it is never persisted to disk)
+model = MultiModalRetrieverModel.from_index(
+    "my_index",
+    index_root=".",
+    storage_config={"api_key": "my-secret"},
+)
 ```
+
+> **Note:** The deprecated `storage_qdrant=True/False` flag still works (maps to
+> `storage_backend="qdrant"/"local"`) but will be removed in a future release.
 
 ## Metadata generation
 
@@ -252,16 +277,40 @@ pytest tests/test_metadata_ai.py -v
 
 All available backends are detected automatically and the suite runs once per backend.
 
-### Qdrant backend tests
+### Vector-store backend tests
+
+Unit tests for all backends (no GPU, backends mocked or run in-process):
 
 ```bash
-# Unit tests (no GPU needed, Qdrant mocked)
+# Local backend
+pytest tests/test_vector_store_local.py
+
+# Qdrant backend (unit: mock client; slow: embedded Qdrant round-trip)
+pytest tests/test_vector_store_qdrant.py -m "not slow"
 pytest tests/test_qdrant.py -m "not slow and not integration"
 
-# Full integration test (GPU + qdrant-client required)
-pytest tests/test_qdrant.py -m "slow and integration"
+# Milvus backend (unit: mock client; slow: Milvus Lite round-trip)
+pytest tests/test_vector_store_milvus.py -m "not slow"
+
+# Remote backend (unit: HTTP calls mocked; server app: FastAPI TestClient)
+pytest tests/test_vector_store_remote.py
+pytest tests/test_vector_db_server_app.py
+pytest tests/test_vector_db_server_config.py
+pytest tests/test_vector_db_server_client.py
+pytest tests/test_vector_db_server_manager.py
+
+# Factory and backend dispatch
+pytest tests/test_vector_store_factory.py
+pytest tests/test_colpali_backend_dispatch.py
 ```
 
+Integration tests (require a live vector-DB server — see Remote vector-DB server section):
+
+```bash
+# Set the server URL to skip the skipif guard
+export FORETRIEVAL_TEST_DB_SERVER_URL=http://localhost:18000
+pytest tests/ -m "slow and integration" -v
+```
 ### Metadata filter tests
 
 ```bash
@@ -369,6 +418,124 @@ Then use `http://localhost:8000` as the URL.
 | `verify_ssl` | `True` | Verify SSL certificates |
 | `batch_size` | `4` | Images per request (auto-halved on OOM) |
 | `request_timeout` | `120` | HTTP timeout in seconds |
+
+## Remote vector-DB server
+
+FORetrieval can offload all vector-store operations (indexing, search, fetch) to a remote HTTP server.  The local machine only stores the processor and the shared sidecar files — collections live entirely on the server.
+
+**Requires:** `foretrieval[vector_db_server]` (adds `fastapi`, `uvicorn`, `paramiko`).
+
+### Quick start
+
+Start the server manually on a remote host:
+
+```bash
+pip install "foretrieval[qdrant,milvus,vector_db_server]"
+uvicorn foretrieval.vector_db_server.server:app --host 0.0.0.0 --port 18000
+# or: foretrieval-db-server   (console script)
+```
+
+Then use it from the client:
+
+```python
+from foretrieval import MultiModalRetrieverModel
+
+model = MultiModalRetrieverModel.from_pretrained(
+    "athrael-soju/colqwen3.5-4.5B-v3",
+    storage_backend="remote",
+    storage_config={
+        "url": "http://gpu-server:18000",
+        "backend": "qdrant",   # server-side storage backend: local | qdrant | milvus
+    },
+)
+model.index("path/to/docs/", index_name="my_index")
+results = model.search("maximum altitude", k=3)
+```
+
+### Auto-deploy
+
+Set `auto_deploy=True` to have FORetrieval SSH to the remote host, build the Docker image from the local `foretrieval` source, and start the container automatically. Requires `foretrieval[vector_db_server]` and Docker on the remote host.
+
+```python
+model = MultiModalRetrieverModel.from_pretrained(
+    "athrael-soju/colqwen3.5-4.5B-v3",
+    storage_backend="remote",
+    storage_config={
+        "url": "http://gpu-server:18000",
+        "backend": "qdrant",
+        "auto_deploy": True,
+        "ssh_host": "gpu-server",
+        "data_dir": "/var/lib/foretrieval_db",  # bind-mounted into container
+    },
+)
+```
+
+The manager:
+1. Uploads the `foretrieval/` package source to `~/foretrieval_db_build/` via SSH.
+2. Runs `docker build -t foretrieval-vector-db:local` on the remote.
+3. Starts the container: `docker run -p 18000:18000 -v <data_dir>:/data …`.
+4. Writes metadata to `~/.foretrieval/db_deployment.json` on the remote. Subsequent calls detect the running container and skip re-deployment.
+
+### Authentication and SSL
+
+```python
+storage_config={
+    "url": "https://gpu-server:18000",
+    "backend": "qdrant",
+    "api_key": "my-secret-token",   # Authorization: Bearer header
+    "verify_ssl": False,            # for self-signed certificates
+}
+```
+
+Start the server with `FOR_DB_API_KEY=my-secret-token` to require authentication.
+
+### SSH tunnel (firewalled servers)
+
+If port 18000 is not directly reachable, open an SSH tunnel first:
+
+```bash
+ssh -fNL 18000:localhost:18000 gpu-server
+```
+
+Then use `http://localhost:18000` as the URL.
+
+### Server environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FOR_DB_DATA_DIR` | `/data` | Root directory where collections are persisted |
+| `FOR_DB_API_KEY` | `""` | Bearer token (auth disabled if empty) |
+| `FOR_DB_HOST` | `0.0.0.0` | Bind address |
+| `FOR_DB_PORT` | `18000` | Bind port |
+
+### VectorDBServerConfig reference
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `url` | required | Base URL of the vector-DB server |
+| `backend` | `"qdrant"` | Server-side storage backend (`local`, `qdrant`, or `milvus`) |
+| `storage_config` | `None` | Extra backend-specific config forwarded to the server (e.g. `{"candidate_limit": 128}` for Milvus) |
+| `auto_deploy` | `false` | SSH + Docker auto-deploy |
+| `ssh_host` | `None` | SSH hostname (required when `auto_deploy=True`) |
+| `ssh_user` | `None` | SSH username (defaults to `$USER`) |
+| `ssh_key_path` | `None` | Path to SSH private key (defaults to SSH agent) |
+| `port` | `18000` | Port exposed on the remote server |
+| `api_key` | `None` | Bearer token for server authentication (never persisted to disk) |
+| `verify_ssl` | `True` | Verify SSL certificates |
+| `request_timeout` | `120` | HTTP timeout in seconds |
+| `data_dir` | `/var/lib/foretrieval_db` | Data path on the remote host (bind-mounted into container) |
+
+### Persistence and reload
+
+When a remote index is exported (`model._export_index()`), the `index_config.json.gz` on the local filesystem stores `storage_backend="remote"` and the server URL.  Sensitive fields (`api_key`) are **never** persisted to disk.  To reload the index later:
+
+```python
+model = MultiModalRetrieverModel.from_index(
+    "my_index",
+    index_root=".",
+    storage_config={"api_key": "my-secret"},   # re-supply at load time
+)
+```
 
 ## Local model quantization
 
