@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Verify tag matches pyproject version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          PYV=$(python3 -c "import tomllib,sys; print(tomllib.loads(open('pyproject.toml','rb').read())['project']['version'])")
+          echo "Tag version:        $TAG"
+          echo "pyproject version:  $PYV"
+          if [ "$TAG" != "$PYV" ]; then
+            echo "::error::Tag v$TAG does not match pyproject.toml version $PYV"
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: List build artefacts
+        run: ls -lah dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          draft: false
+          prerelease: false

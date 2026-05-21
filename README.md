@@ -4,7 +4,8 @@ FORetrieval is a multimodal document retrieval library built on top of [colpali-
 
 Key features:
 
-- **Two storage backends** — local file-based (Colpali legacy `.pt` files) or Qdrant embedded vector store (default)
+- **Four storage backends** — `local` (Colpali legacy `.pt` files), `qdrant` (default, embedded), `milvus` (Milvus Lite), and `remote` (HTTP-delegated vector-DB server)
+- **Remote embedding server** — offload all embedding computation to a remote vLLM GPU server; the local machine needs no GPU
 - **Metadata generation** — filesystem metadata always; AI-generated tags, language detection, and short descriptions optionally
 - **Metadata filtering** — filter the retrieval pool by `ext`, `mtime`, `language`, `tags`, `document_type`, or arbitrary regex patterns before scoring
 - **Docling ingestion** — optional semantic PDF chunking using [Docling](https://github.com/DS4SD/docling), producing image chunks aligned with document structure
@@ -21,6 +22,21 @@ uv sync --extra docling         # Docling-based PDF chunking
 uv sync --extra embedding_server  # Remote vLLM embedding server (adds paramiko for auto-deploy)
 uv sync --extra quantization    # 4-bit / 8-bit local model quantization (adds bitsandbytes)
 ```
+
+## Releases
+
+FORetrieval uses [CalVer](https://calver.org) (`YYYY.MM.MICRO`). Releases are published on GitHub only (no PyPI) and inherit the visibility of this private repository.
+
+Install a specific release directly from a git tag (requires SSH access to the repo):
+
+```bash
+uv pip install "foretrieval @ git+ssh://git@github.com/FOR-sight-ai/FORetrieval.git@v2026.5.0"
+
+# With extras:
+uv pip install "foretrieval[qdrant,vector_db_server] @ git+ssh://git@github.com/FOR-sight-ai/FORetrieval.git@v2026.5.0"
+```
+
+Or download the `.whl` / `.tar.gz` attached to a release on the [Releases page](https://github.com/FOR-sight-ai/FORetrieval/releases) and install it with `uv pip install <file>`.
 
 ## Pre-requisites
 
@@ -86,7 +102,7 @@ FORetrieval supports four backends for storing and searching embeddings:
 The backend is fixed when an index is first created. It cannot be changed without recreating the index.
 
 ```python
-# Local (in-memory .pt files)
+# Local (on-disk .pt files)
 model = MultiModalRetrieverModel.from_pretrained(..., storage_backend="local")
 
 # Qdrant (embedded, on-disk)
@@ -430,7 +446,7 @@ FORetrieval can offload all vector-store operations (indexing, search, fetch) to
 Start the server manually on a remote host:
 
 ```bash
-pip install "foretrieval[qdrant,milvus,vector_db_server]"
+pip install "foretrieval[qdrant,milvus,vector_db_server]"   # or: uv pip install "foretrieval[qdrant,milvus,vector_db_server]"
 uvicorn foretrieval.vector_db_server.server:app --host 0.0.0.0 --port 18000
 # or: foretrieval-db-server   (console script)
 ```
