@@ -22,7 +22,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME#v}"
-          PYV=$(python3 -c "import tomllib,sys; print(tomllib.loads(open('pyproject.toml','rb').read())['project']['version'])")
+          PYV=$(grep -E '^version[[:space:]]*=' pyproject.toml | head -n1 | sed -E 's/^version[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/')
           echo "Tag version:        $TAG"
           echo "pyproject version:  $PYV"
           if [ "$TAG" != "$PYV" ]; then
