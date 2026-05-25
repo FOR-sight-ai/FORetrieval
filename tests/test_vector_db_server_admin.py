@@ -10,7 +10,6 @@ Covers:
 
 from __future__ import annotations
 
-import gzip
 import json
 import os
 import tempfile
@@ -43,8 +42,8 @@ def _mk_index_dir(name: str, n_files: int = 3, size_per_file: int = 100) -> Path
     """Create a fake index directory under _DATA_DIR."""
     p = _server_mod._DATA_DIR / name
     p.mkdir(parents=True, exist_ok=True)
-    # Mark as an index by adding the trigger sentinel
-    (p / "index_config.json.gz").write_bytes(gzip.compress(b'{"ok": true}'))
+    # Mark as an index by adding the server-side sentinel (written by _write_meta).
+    (p / "index.json").write_text('{"backend": "qdrant", "storage_config": null}')
     for i in range(n_files):
         (p / f"data_{i}.bin").write_bytes(b"x" * size_per_file)
     return p

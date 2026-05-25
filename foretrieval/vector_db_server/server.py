@@ -461,8 +461,14 @@ _CACHE_LOCK = asyncio.Lock()
 
 
 def _is_index_dir(path: Path) -> bool:
-    """Return True when ``path`` looks like a FORetrieval index directory."""
-    return (path / "index_config.json.gz").exists() or (path / "metadata.json.gz").exists()
+    """Return True when ``path`` looks like a FORetrieval index directory.
+
+    Uses the server-side collection metadata file written by ``_write_meta``
+    (``<name>/index.json``) as the sentinel.  The client-side sidecar files
+    (``index_config.json.gz``, ``metadata.json.gz``) live on the Streamlit
+    host, not on the server, so they are never present here.
+    """
+    return (path / "index.json").exists()
 
 
 def _dir_stats_sync(path: Path) -> Tuple[int, int, float]:
