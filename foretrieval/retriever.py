@@ -154,6 +154,7 @@ class MultiModalRetrieverModel:
         max_image_height: Optional[int] = None,
         description: str = "",
         ai_cfg: Optional[Dict[str, Any]] = None,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
         **kwargs,
     ):
         """Build an index from input documents.
@@ -171,6 +172,11 @@ class MultiModalRetrieverModel:
             ai_cfg (Optional[Dict]): Provider config for the summary LLM (same format as
                 ``ai_metadata_provider_factory``).  Only used for auto-generation when
                 ``description`` is empty.
+            on_progress (Optional[Callable]): Callback invoked with progress events.
+                Each event is a dict with at least a ``stage`` key. Possible stages:
+                ``"start"`` (with ``n_files``), ``"file_start"``, ``"page"``,
+                ``"file_done"``, ``"all_done"``. The callback is best-effort:
+                exceptions raised by the callback are swallowed.
 
         Returns:
             None
@@ -186,6 +192,7 @@ class MultiModalRetrieverModel:
             max_image_height=max_image_height,
             description=description,
             ai_cfg=ai_cfg,
+            on_progress=on_progress,
             **kwargs,
         )
 

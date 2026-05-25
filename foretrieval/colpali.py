@@ -517,6 +517,7 @@ class ColPaliModel:
         batch_size: int = 1,
         description: str = "",
         ai_cfg: Optional[Dict[str, Any]] = None,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Union[Dict[int, str], None]:
         if (
             self.index_name is not None
@@ -581,8 +582,14 @@ class ColPaliModel:
                 raise ValueError(
                     f"Number of metadata entries ({len(metadata)}) does not match number of documents ({len(items)})"
                 )
+            n_files = len(items)
+            if on_progress is not None:
+                try:
+                    on_progress({"stage": "start", "n_files": n_files})
+                except Exception:  # noqa: BLE001
+                    pass
             for i, item in tqdm(
-                enumerate(items), total=len(items), desc="Indexing files"
+                enumerate(items), total=n_files, desc="Indexing files"
             ):
                 doc_id = doc_ids[i] if doc_ids else self.highest_doc_id + 1
                 if metadata is None:
@@ -594,6 +601,17 @@ class ColPaliModel:
                 else:
                     doc_md = metadata[doc_id] if metadata else None
 
+                if on_progress is not None:
+                    try:
+                        on_progress({
+                            "stage": "file_start",
+                            "file": item.name,
+                            "file_idx": i,
+                            "n_files": n_files,
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
+
                 try:
                     self.add_to_index(
                         item,
@@ -601,10 +619,24 @@ class ColPaliModel:
                         doc_id=doc_id,
                         metadata=doc_md,
                         batch_size=batch_size,
+                        on_progress=on_progress,
+                        _file_idx=i,
+                        _n_files=n_files,
                     )
                 except Exception as e:
                     logger.warning(f"Skipping faulty PDF {item}:\n{str(e)}")
                     continue
+
+                if on_progress is not None:
+                    try:
+                        on_progress({
+                            "stage": "file_done",
+                            "file": item.name,
+                            "file_idx": i,
+                            "n_files": n_files,
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
 
         else:
             if metadata is not None and len(metadata) != 1:
@@ -613,12 +645,42 @@ class ColPaliModel:
                 )
             doc_id = doc_ids[0] if doc_ids else self.highest_doc_id + 1
             doc_metadata = metadata[0] if metadata else None
+            if on_progress is not None:
+                try:
+                    on_progress({"stage": "start", "n_files": 1})
+                    on_progress({
+                        "stage": "file_start",
+                        "file": input_path.name,
+                        "file_idx": 0,
+                        "n_files": 1,
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
             self.add_to_index(
                 input_path,
                 store_collection_with_index,
                 doc_id=doc_id,
                 metadata=doc_metadata,
+                on_progress=on_progress,
+                _file_idx=0,
+                _n_files=1,
             )
+            if on_progress is not None:
+                try:
+                    on_progress({
+                        "stage": "file_done",
+                        "file": input_path.name,
+                        "file_idx": 0,
+                        "n_files": 1,
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if on_progress is not None:
+            try:
+                on_progress({"stage": "all_done"})
+            except Exception:  # noqa: BLE001
+                pass
 
         # Auto-generate index description from per-doc AI metadata when available
         if not description and ai_cfg and self.doc_id_to_metadata:
@@ -638,6 +700,9 @@ class ColPaliModel:
         doc_id: Optional[Union[int, List[int]]] = None,
         metadata: Optional[Union[List[DocMetadata], DocMetadata]] = None,
         batch_size: int = 1,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        _file_idx: int = 0,
+        _n_files: int = 1,
     ) -> Dict[int, str]:
         if self.index_name is None:
             raise ValueError(
@@ -698,6 +763,9 @@ class ColPaliModel:
                         current_doc_id,
                         current_metadata,
                         batch_size,
+                        on_progress=on_progress,
+                        _file_idx=_file_idx,
+                        _n_files=_n_files,
                     )
                 else:
                     stored_path = self._process_and_add_to_index(
@@ -706,6 +774,9 @@ class ColPaliModel:
                         current_doc_id,
                         current_metadata,
                         batch_size,
+                        on_progress=on_progress,
+                        _file_idx=_file_idx,
+                        _n_files=_n_files,
                     )
                     if stored_path is None:
                         self.doc_ids_to_file_names[current_doc_id] = "In-memory Image"
@@ -714,7 +785,10 @@ class ColPaliModel:
 
             elif isinstance(item, Image.Image):
                 self._process_and_add_to_index(
-                    item, store_collection_with_index, current_doc_id, current_metadata
+                    item, store_collection_with_index, current_doc_id, current_metadata,
+                    on_progress=on_progress,
+                    _file_idx=_file_idx,
+                    _n_files=_n_files,
                 )
                 self.doc_ids_to_file_names[current_doc_id] = "In-memory Image"
             else:
@@ -730,12 +804,18 @@ class ColPaliModel:
         base_doc_id: int,
         metadata: Optional[Dict[str, Union[str, int]]],
         batch_size: int,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        _file_idx: int = 0,
+        _n_files: int = 1,
     ):
         for i, item in enumerate(directory.iterdir()):
             print(f"Indexing file: {item}")
             current_doc_id = base_doc_id + i
             stored_path = self._process_and_add_to_index(
-                item, store_collection_with_index, current_doc_id, metadata, batch_size
+                item, store_collection_with_index, current_doc_id, metadata, batch_size,
+                on_progress=on_progress,
+                _file_idx=_file_idx,
+                _n_files=_n_files,
             )
             if stored_path is None:
                 self.doc_ids_to_file_names[current_doc_id] = "In-memory Image"
@@ -749,11 +829,29 @@ class ColPaliModel:
         doc_id: Union[str, int],
         metadata: Optional[Dict[str, Union[str, int]]] = None,
         batch_size: int = 1,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        _file_idx: int = 0,
+        _n_files: int = 1,
     ) -> Optional[Path]:
         """
         Process and index an image or any file (converted to PDF if needed).
         Returns the 'canonical' path (PDF or image) used, or None for in-memory images.
         """
+        def _emit_page(file_name: str, page_idx: int, n_pages: int) -> None:
+            if on_progress is None:
+                return
+            try:
+                on_progress({
+                    "stage": "page",
+                    "file": file_name,
+                    "file_idx": _file_idx,
+                    "n_files": _n_files,
+                    "page_idx": page_idx,
+                    "n_pages": n_pages,
+                })
+            except Exception:  # noqa: BLE001
+                pass
+
         if isinstance(item, Path):
             ext = item.suffix.lower()
 
@@ -778,14 +876,16 @@ class ColPaliModel:
                     self.docling_dir.mkdir(parents=True, exist_ok=True)
                 chunks = chunk_pdf_to_images(pdf_file, output_dir=self.docling_dir)
 
-                for i in range(0, len(chunks), batch_size):
+                n_chunks = len(chunks)
+                for i in range(0, n_chunks, batch_size):
                     batch_chunks, batch_page_ids, batch_chunk_ids = [], [], []
-                    for j in range(i, min(i + batch_size, len(chunks))):
+                    for j in range(i, min(i + batch_size, n_chunks)):
                         ch = chunks[j]
                         image = Image.open(ch.path)
                         batch_chunks.append(image)
                         batch_page_ids.append(ch.page_id)
                         batch_chunk_ids.append(ch.elem_id)
+                        _emit_page(item.name, j, n_chunks)
                     self._add_to_index(
                         batch_chunks,
                         store_collection_with_index,
@@ -799,6 +899,7 @@ class ColPaliModel:
 
             elif ext in [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif"]:
                 image = Image.open(item)
+                _emit_page(item.name, 0, 1)
                 self._add_to_index(image, store_collection_with_index, doc_id, metadata=metadata)
                 return item.resolve()
 
@@ -812,13 +913,15 @@ class ColPaliModel:
                         output_folder=path,
                         paths_only=True,
                     )
-                    for i in range(0, len(images), batch_size):
+                    n_pages = len(images)
+                    for i in range(0, n_pages, batch_size):
                         batch_images, batch_page_ids = [], []
-                        for j in range(i, min(i + batch_size, len(images))):
+                        for j in range(i, min(i + batch_size, n_pages)):
                             image_path = images[j]
                             image = Image.open(image_path)
                             batch_images.append(image)
                             batch_page_ids.append(j + 1)
+                            _emit_page(item.name, j, n_pages)
                         self._add_to_index(
                             batch_images,
                             store_collection_with_index,
@@ -843,13 +946,15 @@ class ColPaliModel:
                         output_folder=path,
                         paths_only=True,
                     )
-                    for i in range(0, len(images), batch_size):
+                    n_pages = len(images)
+                    for i in range(0, n_pages, batch_size):
                         batch_images, batch_page_ids = [], []
-                        for j in range(i, min(i + batch_size, len(images))):
+                        for j in range(i, min(i + batch_size, n_pages)):
                             image_path = images[j]
                             image = Image.open(image_path)
                             batch_images.append(image)
                             batch_page_ids.append(j + 1)
+                            _emit_page(item.name, j, n_pages)
                         self._add_to_index(
                             batch_images,
                             store_collection_with_index,
@@ -860,6 +965,7 @@ class ColPaliModel:
                 return Path(pdf_file).resolve()
 
         elif isinstance(item, Image.Image):
+            _emit_page("<in-memory>", 0, 1)
             self._add_to_index(item, store_collection_with_index, doc_id, metadata=metadata)
             return None
         else:

@@ -35,6 +35,8 @@ _POINT_EXISTS = "/v1/point/{name}/{point_id}/exists"
 _UPSERT = "/v1/upsert/{name}"
 _SEARCH = "/v1/search/{name}"
 _VECTOR = "/v1/vector/{name}/{point_id}"
+_ADMIN_INDEXES = "/v1/admin/indexes"
+_ADMIN_DATA_FOLDERS = "/v1/admin/data_folders"
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +284,38 @@ class VectorDBServerClient:
                 f"Cannot reach vector-DB server at {self.config.url}"
             ) from exc
         _raise_for_status(resp)
+
+    def list_indexes(self) -> dict:
+        """Return the server's list of index directories under ``data_dir``.
+
+        The returned payload has the shape
+        ``{"items": [{"name": str, "path": str, "size_bytes": int,
+        "n_files": int, "modified": float, "has_collection": bool,
+        "backend": Optional[str]}, ...], "data_dir": str, "count": int}``.
+        """
+        try:
+            resp = self._client.get(self.config.url + _ADMIN_INDEXES)
+        except httpx.HTTPError as exc:
+            raise ConnectionError(
+                f"Cannot reach vector-DB server at {self.config.url}"
+            ) from exc
+        _raise_for_status(resp)
+        return resp.json()
+
+    def list_data_folders(self) -> dict:
+        """Return every direct subdirectory under ``data_dir`` on the server.
+
+        Each item carries ``is_index`` so the caller can filter client-side.
+        Same envelope as :py:meth:`list_indexes`.
+        """
+        try:
+            resp = self._client.get(self.config.url + _ADMIN_DATA_FOLDERS)
+        except httpx.HTTPError as exc:
+            raise ConnectionError(
+                f"Cannot reach vector-DB server at {self.config.url}"
+            ) from exc
+        _raise_for_status(resp)
+        return resp.json()
 
     # ------------------------------------------------------------------
     # Lifecycle
