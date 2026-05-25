@@ -25,7 +25,14 @@ from .config import EmbeddingServerConfig
 logger = logging.getLogger(__name__)
 
 # Remote path where deployment metadata is stored.
-_REMOTE_METADATA_PATH = "~/.foretrieval/deployment.json"
+# Remote path for deployment metadata.
+#
+# Relative to the SSH user's home directory.  Resolved to an absolute path
+# at runtime via ``sftp.normalize('.')`` so that any future SFTP usage
+# (which does NOT expand ``~``) sees a usable path.  The remote shell
+# would expand ``~`` for plain commands; the absolute form keeps both
+# paths consistent and avoids the foot-gun.
+_REMOTE_METADATA_SUBPATH = ".foretrieval/deployment.json"
 _CONTAINER_NAME = "foretrieval_embedding_server"
 
 # vLLM Docker image.
@@ -53,6 +60,30 @@ class EmbeddingServerManager:
             raise ValueError("EmbeddingServerManager requires ssh_host in config")
         self.config = config
         self._ssh: Optional[object] = None  # paramiko.SSHClient, lazy
+        self._cached_home: Optional[str] = None  # remote $HOME, lazy
+
+    # ------------------------------------------------------------------
+    # Remote path helpers
+    # ------------------------------------------------------------------
+
+    def _remote_home(self) -> str:
+        """Return the SSH user's absolute home directory on the remote host.
+
+        Resolved once per manager instance via ``sftp.normalize('.')``.
+        """
+        if self._cached_home is not None:
+            return self._cached_home
+        ssh = self._get_ssh()
+        sftp = ssh.open_sftp()
+        try:
+            self._cached_home = sftp.normalize(".")
+        finally:
+            sftp.close()
+        return self._cached_home
+
+    def _metadata_path(self) -> str:
+        """Return the absolute path to the remote deployment-metadata file."""
+        return f"{self._remote_home()}/{_REMOTE_METADATA_SUBPATH}"
 
     # ------------------------------------------------------------------
     # Public API
@@ -97,7 +128,7 @@ class EmbeddingServerManager:
         logger.info("Stopping embedding server on %s", self.config.ssh_host)
         self._run_remote(f"docker stop {_CONTAINER_NAME} 2>/dev/null || true")
         self._run_remote(f"docker rm {_CONTAINER_NAME} 2>/dev/null || true")
-        self._run_remote(f"rm -f {_REMOTE_METADATA_PATH}")
+        self._run_remote(f"rm -f {self._metadata_path()}")
         logger.info("Embedding server stopped")
 
     def redeploy(self, on_line: Optional[Callable[[str], None]] = None) -> None:
@@ -306,8 +337,9 @@ class EmbeddingServerManager:
     # ------------------------------------------------------------------
 
     def _read_remote_metadata(self) -> Optional[dict]:
+        path = self._metadata_path()
         stdout, stderr = self._run_remote(
-            f"cat {_REMOTE_METADATA_PATH} 2>/dev/null || echo '__MISSING__'"
+            f"cat {path} 2>/dev/null || echo '__MISSING__'"
         )
         text = stdout.strip()
         if text == "__MISSING__" or not text:
@@ -319,10 +351,11 @@ class EmbeddingServerManager:
             return None
 
     def _write_remote_metadata(self, metadata: dict) -> None:
+        path = self._metadata_path()
         json_str = json.dumps(metadata).replace("'", "'\\''")
         self._run_remote(
-            f"mkdir -p $(dirname {_REMOTE_METADATA_PATH}) && "
-            f"echo '{json_str}' > {_REMOTE_METADATA_PATH}"
+            f"mkdir -p $(dirname {path}) && "
+            f"echo '{json_str}' > {path}"
         )
 
     # ------------------------------------------------------------------

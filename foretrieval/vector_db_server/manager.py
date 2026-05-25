@@ -28,9 +28,14 @@ from .config import VectorDBServerConfig
 
 logger = logging.getLogger(__name__)
 
-# Remote paths and container constants
-_REMOTE_METADATA_PATH = "~/.foretrieval/db_deployment.json"
-_REMOTE_BUILD_DIR = "~/foretrieval_db_build"
+# Remote paths and container constants.
+#
+# Paths are intentionally relative.  They are joined to the SSH user's
+# absolute home directory (obtained via ``sftp.normalize('.')`` so that
+# SFTP put / get commands receive a real absolute path — SFTP does NOT
+# expand ``~``, unlike the remote shell.
+_REMOTE_METADATA_SUBPATH = ".foretrieval/db_deployment.json"
+_REMOTE_BUILD_SUBDIR = "foretrieval_db_build"
 _CONTAINER_NAME = "foretrieval_vector_db_server"
 _IMAGE_NAME = "foretrieval-vector-db:local"
 
@@ -56,6 +61,33 @@ class VectorDBServerManager:
             raise ValueError("VectorDBServerManager requires ssh_host in config")
         self.config = config
         self._ssh: Optional[object] = None  # paramiko.SSHClient, lazy
+        self._cached_home: Optional[str] = None  # remote $HOME, lazy
+        # Absolute remote build dir, set by _upload_build_context() once
+        # _remote_home() has been resolved.  Read by _deploy() and tests.
+        self._remote_build_dir: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Remote path helpers
+    # ------------------------------------------------------------------
+
+    def _remote_home(self) -> str:
+        """Return the SSH user's absolute home directory on the remote host.
+
+        Resolved once per manager instance via ``sftp.normalize('.')``.
+        """
+        if self._cached_home is not None:
+            return self._cached_home
+        ssh = self._get_ssh()
+        sftp = ssh.open_sftp()
+        try:
+            self._cached_home = sftp.normalize(".")
+        finally:
+            sftp.close()
+        return self._cached_home
+
+    def _metadata_path(self) -> str:
+        """Return the absolute path to the remote deployment-metadata file."""
+        return f"{self._remote_home()}/{_REMOTE_METADATA_SUBPATH}"
 
     # ------------------------------------------------------------------
     # Public API
@@ -140,7 +172,7 @@ class VectorDBServerManager:
         logger.info("Stopping vector-DB server on %s", self.config.ssh_host)
         self._run_remote(f"docker stop {_CONTAINER_NAME} 2>/dev/null || true")
         self._run_remote(f"docker rm {_CONTAINER_NAME} 2>/dev/null || true")
-        self._run_remote(f"rm -f {_REMOTE_METADATA_PATH}")
+        self._run_remote(f"rm -f {self._metadata_path()}")
         logger.info("Vector-DB server stopped")
 
     # ------------------------------------------------------------------
@@ -174,7 +206,7 @@ class VectorDBServerManager:
             except Exception:  # noqa: BLE001
                 pass
         self._run_remote(
-            f"cd {_REMOTE_BUILD_DIR} && "
+            f"cd {self._remote_build_dir} && "
             f"docker build -t {_IMAGE_NAME} -f Dockerfile.vector_db .",
             on_line=on_line,
         )
@@ -268,20 +300,27 @@ class VectorDBServerManager:
             if pyproject.exists():
                 tar.add(pyproject, arcname="pyproject.toml")
 
-        logger.info("Uploading build context to %s:%s …", self.config.ssh_host, _REMOTE_BUILD_DIR)
+        # Resolve the absolute remote build directory.  SFTP does NOT expand
+        # ``~`` (unlike the remote shell), so we must compute the absolute
+        # path explicitly via the SSH user's home directory.
+        remote_dir = f"{self._remote_home()}/{_REMOTE_BUILD_SUBDIR}"
+        self._remote_build_dir = remote_dir
+
+        logger.info("Uploading build context to %s:%s …", self.config.ssh_host, remote_dir)
         ssh = self._get_ssh()
+        # Ensure remote dir exists (shell expansion not needed any more,
+        # but a missing parent would still ENOENT below).
+        self._run_remote(f"mkdir -p {remote_dir}")
         sftp = ssh.open_sftp()
         try:
-            # Ensure remote dir exists
-            self._run_remote(f"mkdir -p {_REMOTE_BUILD_DIR}")
-            sftp.put(tmp_path, f"{_REMOTE_BUILD_DIR.replace('~', '')}/build_context.tar.gz".replace("//", "/"))
+            sftp.put(tmp_path, f"{remote_dir}/build_context.tar.gz")
         finally:
             sftp.close()
             os.unlink(tmp_path)
 
         # Extract on remote
         self._run_remote(
-            f"cd {_REMOTE_BUILD_DIR} && "
+            f"cd {remote_dir} && "
             f"tar -xzf build_context.tar.gz && "
             f"rm build_context.tar.gz"
         )
@@ -304,8 +343,9 @@ class VectorDBServerManager:
     # ------------------------------------------------------------------
 
     def _read_remote_metadata(self) -> Optional[dict]:
+        path = self._metadata_path()
         stdout, _ = self._run_remote(
-            f"cat {_REMOTE_METADATA_PATH} 2>/dev/null || echo '__MISSING__'"
+            f"cat {path} 2>/dev/null || echo '__MISSING__'"
         )
         text = stdout.strip()
         if text == "__MISSING__" or not text:
@@ -317,10 +357,11 @@ class VectorDBServerManager:
             return None
 
     def _write_remote_metadata(self, metadata: dict) -> None:
+        path = self._metadata_path()
         json_str = json.dumps(metadata).replace("'", "'\\''")
         self._run_remote(
-            f"mkdir -p $(dirname {_REMOTE_METADATA_PATH}) && "
-            f"echo '{json_str}' > {_REMOTE_METADATA_PATH}"
+            f"mkdir -p $(dirname {path}) && "
+            f"echo '{json_str}' > {path}"
         )
 
     # ------------------------------------------------------------------

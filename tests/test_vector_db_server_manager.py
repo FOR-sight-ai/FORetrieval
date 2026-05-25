@@ -21,6 +21,10 @@ def _make_manager(**cfg_kwargs) -> VectorDBServerManager:
     }
     cfg = VectorDBServerConfig(**{**defaults, **cfg_kwargs})
     mgr = VectorDBServerManager(cfg)
+    # Stub the remote-home resolution so tests that mock _run_remote
+    # don't accidentally trigger a real SSH connection through
+    # _remote_home() -> sftp.normalize('.').
+    mgr._cached_home = "/home/testuser"
     return mgr
 
 
@@ -308,3 +312,118 @@ class TestGetSshUsesSshUtils:
             r2 = mgr._get_ssh()
         assert r1 is r2
         assert mock_open.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Remote home / metadata path resolution
+# ---------------------------------------------------------------------------
+
+class TestRemoteHome:
+    def test_remote_home_uses_sftp_normalize(self):
+        """_remote_home returns the path produced by sftp.normalize('.')."""
+        mgr = _make_manager()
+        mgr._cached_home = None  # reset the stub from _make_manager
+
+        fake_sftp = MagicMock()
+        fake_sftp.normalize.return_value = "/home/alice"
+        fake_ssh = MagicMock()
+        fake_ssh.open_sftp.return_value = fake_sftp
+        mgr._get_ssh = MagicMock(return_value=fake_ssh)
+
+        assert mgr._remote_home() == "/home/alice"
+        fake_sftp.normalize.assert_called_once_with(".")
+        fake_sftp.close.assert_called_once()
+
+    def test_remote_home_caches_result(self):
+        mgr = _make_manager()
+        mgr._cached_home = None
+
+        fake_sftp = MagicMock()
+        fake_sftp.normalize.return_value = "/home/alice"
+        fake_ssh = MagicMock()
+        fake_ssh.open_sftp.return_value = fake_sftp
+        mgr._get_ssh = MagicMock(return_value=fake_ssh)
+
+        a = mgr._remote_home()
+        b = mgr._remote_home()
+        assert a == b == "/home/alice"
+        fake_ssh.open_sftp.assert_called_once()
+
+
+class TestMetadataPathAbsolute:
+    def test_metadata_path_is_absolute(self):
+        mgr = _make_manager()  # _cached_home = "/home/testuser"
+        path = mgr._metadata_path()
+        assert path.startswith("/home/testuser/")
+        assert "~" not in path
+        assert path.endswith("db_deployment.json")
+
+    def test_stop_uses_absolute_metadata_path(self):
+        """Regression: stop() must rm an absolute path, not '~/...'."""
+        mgr = _make_manager()
+        calls = []
+        mgr._run_remote = MagicMock(
+            side_effect=lambda cmd, on_line=None: (calls.append(cmd), ("", ""))[1]
+        )
+        mgr.stop()
+        rm_calls = [c for c in calls if c.startswith("rm -f")]
+        assert rm_calls, "stop() did not call rm -f"
+        # No tilde in the path passed to rm
+        assert all("~" not in c for c in rm_calls), rm_calls
+        assert any("/home/testuser/" in c for c in rm_calls), rm_calls
+
+
+class TestUploadBuildContextAbsolutePath:
+    def test_sftp_put_uses_absolute_remote_path(self, tmp_path, monkeypatch):
+        """Regression for the SFTP ENOENT bug.
+
+        The previous implementation passed
+            f"{'~/foretrieval_db_build'.replace('~', '')}/build_context.tar.gz"
+        which resolved to '/foretrieval_db_build/...' (root-relative).
+        The new code must pass an absolute path rooted at the remote home.
+        """
+        from foretrieval.vector_db_server import manager as mod
+
+        mgr = _make_manager()  # _cached_home = "/home/testuser"
+
+        # Mock _run_remote (mkdir, tar extract)
+        runs: list[str] = []
+        mgr._run_remote = MagicMock(
+            side_effect=lambda cmd, on_line=None: (runs.append(cmd), ("", ""))[1]
+        )
+
+        # Mock SSH + SFTP
+        sftp_calls: list[tuple] = []
+
+        class _FakeSftp:
+            def put(self, local, remote):
+                sftp_calls.append(("put", local, remote))
+            def close(self):
+                sftp_calls.append(("close",))
+
+        fake_sftp = _FakeSftp()
+        fake_ssh = MagicMock()
+        fake_ssh.open_sftp.return_value = fake_sftp
+        mgr._get_ssh = MagicMock(return_value=fake_ssh)
+
+        # Avoid real disk + real tar — short-circuit _upload_build_context's
+        # source-locating step by pointing it at the actual repo (it exists).
+        # tarfile is small so let it run.
+        mgr._upload_build_context()
+
+        # Verify SFTP put destination
+        put_calls = [c for c in sftp_calls if c[0] == "put"]
+        assert len(put_calls) == 1
+        remote_dest = put_calls[0][2]
+        assert remote_dest == "/home/testuser/foretrieval_db_build/build_context.tar.gz", remote_dest
+
+        # Verify the mkdir uses the same absolute path
+        mkdir_calls = [c for c in runs if c.startswith("mkdir -p")]
+        assert any("/home/testuser/foretrieval_db_build" in c for c in mkdir_calls), mkdir_calls
+
+        # Verify tar extraction targets the same absolute path
+        tar_calls = [c for c in runs if "tar -xzf" in c]
+        assert any("/home/testuser/foretrieval_db_build" in c for c in tar_calls), tar_calls
+
+        # _remote_build_dir stashed for _deploy() to reuse
+        assert mgr._remote_build_dir == "/home/testuser/foretrieval_db_build"

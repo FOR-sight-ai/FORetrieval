@@ -371,7 +371,12 @@ class TestEmbeddingServerManager:
         defaults = dict(auto_deploy=True, ssh_host=_TEST_SSH_HOST, n_gpus=-1)
         defaults.update(kwargs)
         cfg = _make_config(**defaults)
-        return EmbeddingServerManager(cfg)
+        mgr = EmbeddingServerManager(cfg)
+        # Stub the remote-home resolution so tests that mock _run_remote
+        # don't accidentally trigger a real SSH connection through
+        # _remote_home() -> sftp.normalize('.').
+        mgr._cached_home = "/home/testuser"
+        return mgr
 
     def _mock_ssh(self, manager: EmbeddingServerManager, remote_outputs: dict):
         def fake_run(cmd, on_line=None):
@@ -588,6 +593,26 @@ class TestEmbeddingServerManager:
             ssh_key_path="/k",
         )
         assert result is fake_client
+
+    def test_remote_home_uses_sftp_normalize(self):
+        mgr = self._make_manager()
+        mgr._cached_home = None  # reset the stub from _make_manager
+
+        fake_sftp = MagicMock()
+        fake_sftp.normalize.return_value = "/home/alice"
+        fake_ssh = MagicMock()
+        fake_ssh.open_sftp.return_value = fake_sftp
+        mgr._get_ssh = MagicMock(return_value=fake_ssh)
+
+        assert mgr._remote_home() == "/home/alice"
+        fake_sftp.normalize.assert_called_once_with(".")
+
+    def test_metadata_path_is_absolute(self):
+        mgr = self._make_manager()  # _cached_home = "/home/testuser"
+        path = mgr._metadata_path()
+        assert path.startswith("/home/testuser/")
+        assert "~" not in path
+        assert path.endswith("deployment.json")
 
 
 # ---------------------------------------------------------------------------
