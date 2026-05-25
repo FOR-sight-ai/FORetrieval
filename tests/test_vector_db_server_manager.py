@@ -273,3 +273,38 @@ class TestOnLineStreaming:
 
         stdout, _ = mgr._run_remote("echo hi")
         assert "full output" in stdout
+
+
+# ---------------------------------------------------------------------------
+# _get_ssh uses ssh_utils.open_ssh_client
+# ---------------------------------------------------------------------------
+
+class TestGetSshUsesSshUtils:
+    def test_get_ssh_delegates_to_open_ssh_client(self):
+        """_get_ssh must call foretrieval.ssh_utils.open_ssh_client.
+
+        This is the regression test for the bug where paramiko was
+        called with a raw alias string and DNS-failed for entries that
+        only existed in ~/.ssh/config.
+        """
+        mgr = _make_manager(ssh_host="pf01", ssh_user="alice", ssh_key_path="/k")
+        fake_client = MagicMock()
+        with patch("foretrieval.ssh_utils.open_ssh_client",
+                   return_value=fake_client) as mock_open:
+            result = mgr._get_ssh()
+        mock_open.assert_called_once_with(
+            ssh_host="pf01",
+            ssh_user="alice",
+            ssh_key_path="/k",
+        )
+        assert result is fake_client
+
+    def test_get_ssh_is_cached(self):
+        mgr = _make_manager()
+        fake_client = MagicMock()
+        with patch("foretrieval.ssh_utils.open_ssh_client",
+                   return_value=fake_client) as mock_open:
+            r1 = mgr._get_ssh()
+            r2 = mgr._get_ssh()
+        assert r1 is r2
+        assert mock_open.call_count == 1

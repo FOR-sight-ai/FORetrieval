@@ -571,6 +571,24 @@ class TestEmbeddingServerManager:
         mgr._run_remote("docker pull vllm/vllm-openai", on_line=captured.append)
         assert captured == ["pulling…", "complete"]
 
+    def test_get_ssh_delegates_to_open_ssh_client(self):
+        """_get_ssh must call foretrieval.ssh_utils.open_ssh_client.
+
+        Regression test for the bug where paramiko was given a raw alias
+        and DNS-failed for entries that only existed in ~/.ssh/config.
+        """
+        mgr = self._make_manager(ssh_user="alice", ssh_key_path="/k")
+        fake_client = MagicMock()
+        with patch("foretrieval.ssh_utils.open_ssh_client",
+                   return_value=fake_client) as mock_open:
+            result = mgr._get_ssh()
+        mock_open.assert_called_once_with(
+            ssh_host=_TEST_SSH_HOST,
+            ssh_user="alice",
+            ssh_key_path="/k",
+        )
+        assert result is fake_client
+
 
 # ---------------------------------------------------------------------------
 # Quantization config (local mode, no GPU needed — just validates ctor)

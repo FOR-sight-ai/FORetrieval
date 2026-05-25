@@ -328,25 +328,21 @@ class VectorDBServerManager:
     # ------------------------------------------------------------------
 
     def _get_ssh(self):
-        """Return a connected paramiko SSHClient (lazy init)."""
-        import paramiko
+        """Return a connected paramiko SSHClient (lazy init).
 
+        Honours ``~/.ssh/config`` (Host aliases, User, Port, IdentityFile,
+        ProxyCommand, ProxyJump) via :py:func:`foretrieval.ssh_utils.open_ssh_client`.
+        """
         if self._ssh is not None:
             return self._ssh
 
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-
-        connect_kwargs: dict = {
-            "hostname": self.config.ssh_host,
-            "username": self.config.ssh_user or os.environ.get("USER", "root"),
-        }
-        if self.config.ssh_key_path:
-            connect_kwargs["key_filename"] = self.config.ssh_key_path
-
-        client.connect(**connect_kwargs)
-        self._ssh = client
-        return client
+        from ..ssh_utils import open_ssh_client
+        self._ssh = open_ssh_client(
+            ssh_host=self.config.ssh_host,
+            ssh_user=self.config.ssh_user,
+            ssh_key_path=self.config.ssh_key_path,
+        )
+        return self._ssh
 
     def _run_remote(
         self,
