@@ -22,7 +22,7 @@ import tarfile
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import VectorDBServerConfig
 
@@ -96,6 +96,45 @@ class VectorDBServerManager:
                 logger.warning("Container not running — redeploying")
                 self._deploy()
 
+    def redeploy(self, on_line: Optional[Callable[[str], None]] = None) -> None:
+        """Force a fresh build + container restart regardless of current state.
+
+        Unlike :py:meth:`ensure_deployed`, this always rebuilds the image and
+        restarts the container.  Use it after pulling new FORetrieval source
+        on the local machine.
+
+        Args:
+            on_line: Optional callback invoked with every line of remote
+                stdout (Docker pull / build / run output).  Best-effort:
+                callback exceptions are swallowed.
+        """
+        try:
+            import paramiko  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "paramiko is required for auto_deploy. "
+                "Install it with: pip install 'foretrieval[vector_db_server]'"
+            ) from exc
+
+        logger.info(
+            "Force redeploying vector-DB server on %s", self.config.ssh_host
+        )
+        self._deploy(on_line=on_line)
+
+    def is_running(self) -> bool:
+        """Return True iff the container is currently up."""
+        try:
+            return self._is_container_running()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def get_remote_metadata(self) -> Optional[dict]:
+        """Return the remote deployment metadata, or None if not deployed."""
+        try:
+            return self._read_remote_metadata()
+        except Exception:  # noqa: BLE001
+            return None
+
     def stop(self) -> None:
         """Stop and remove the Docker container; delete metadata file."""
         logger.info("Stopping vector-DB server on %s", self.config.ssh_host)
@@ -108,29 +147,50 @@ class VectorDBServerManager:
     # Deploy
     # ------------------------------------------------------------------
 
-    def _deploy(self) -> None:
-        """Upload source, build image, run container, write metadata."""
+    def _deploy(self, on_line: Optional[Callable[[str], None]] = None) -> None:
+        """Upload source, build image, run container, write metadata.
+
+        Args:
+            on_line: Optional callback invoked with every line of remote
+                stdout produced by the long-running build/run commands.
+        """
         # Stop stale container
-        self._run_remote(f"docker stop {_CONTAINER_NAME} 2>/dev/null || true")
-        self._run_remote(f"docker rm {_CONTAINER_NAME} 2>/dev/null || true")
+        self._run_remote(f"docker stop {_CONTAINER_NAME} 2>/dev/null || true", on_line=on_line)
+        self._run_remote(f"docker rm {_CONTAINER_NAME} 2>/dev/null || true", on_line=on_line)
 
         # Upload foretrieval source + Dockerfile to remote build dir
+        if on_line is not None:
+            try:
+                on_line("Uploading build context …")
+            except Exception:  # noqa: BLE001
+                pass
         self._upload_build_context()
 
         # Build Docker image on the remote host
         logger.info("Building Docker image '%s' on %s …", _IMAGE_NAME, self.config.ssh_host)
+        if on_line is not None:
+            try:
+                on_line(f"Building image {_IMAGE_NAME} …")
+            except Exception:  # noqa: BLE001
+                pass
         self._run_remote(
             f"cd {_REMOTE_BUILD_DIR} && "
-            f"docker build -t {_IMAGE_NAME} -f Dockerfile.vector_db ."
+            f"docker build -t {_IMAGE_NAME} -f Dockerfile.vector_db .",
+            on_line=on_line,
         )
 
         # Create data directory on remote
-        self._run_remote(f"mkdir -p {self.config.data_dir}")
+        self._run_remote(f"mkdir -p {self.config.data_dir}", on_line=on_line)
 
         # Run container
         cmd = self._build_docker_run_cmd()
         logger.info("Starting container: %s", cmd)
-        self._run_remote(cmd)
+        if on_line is not None:
+            try:
+                on_line("Starting container …")
+            except Exception:  # noqa: BLE001
+                pass
+        self._run_remote(cmd, on_line=on_line)
 
         # Write metadata
         metadata = {
@@ -144,6 +204,11 @@ class VectorDBServerManager:
         logger.info(
             "Deployment complete — server starting on port %d", self.config.port
         )
+        if on_line is not None:
+            try:
+                on_line("Deployment complete.")
+            except Exception:  # noqa: BLE001
+                pass
 
     def _build_docker_run_cmd(self) -> str:
         cfg = self.config
@@ -283,14 +348,40 @@ class VectorDBServerManager:
         self._ssh = client
         return client
 
-    def _run_remote(self, cmd: str) -> tuple[str, str]:
-        """Run a shell command on the remote host; return (stdout, stderr)."""
+    def _run_remote(
+        self,
+        cmd: str,
+        on_line: Optional[Callable[[str], None]] = None,
+    ) -> tuple[str, str]:
+        """Run a shell command on the remote host; return (stdout, stderr).
+
+        When ``on_line`` is provided, stdout is streamed line by line and the
+        callback is invoked for each.  Useful for surfacing Docker build
+        progress in interactive UIs.  Callback exceptions are swallowed.
+        """
         ssh = self._get_ssh()
         logger.debug("Remote: %s", cmd)
         _, stdout_f, stderr_f = ssh.exec_command(cmd)
-        exit_code = stdout_f.channel.recv_exit_status()
-        stdout = stdout_f.read().decode("utf-8", errors="replace")
-        stderr = stderr_f.read().decode("utf-8", errors="replace")
+
+        if on_line is None:
+            exit_code = stdout_f.channel.recv_exit_status()
+            stdout = stdout_f.read().decode("utf-8", errors="replace")
+            stderr = stderr_f.read().decode("utf-8", errors="replace")
+        else:
+            collected: list[str] = []
+            # Stream stdout
+            for raw in iter(stdout_f.readline, ""):
+                if not raw:
+                    break
+                collected.append(raw)
+                try:
+                    on_line(raw.rstrip("\n"))
+                except Exception:  # noqa: BLE001
+                    pass
+            exit_code = stdout_f.channel.recv_exit_status()
+            stdout = "".join(collected)
+            stderr = stderr_f.read().decode("utf-8", errors="replace")
+
         if stderr:
             logger.debug("Remote stderr: %s", stderr[:300])
         if exit_code != 0 and "|| true" not in cmd and "2>/dev/null" not in cmd:

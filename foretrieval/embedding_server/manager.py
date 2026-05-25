@@ -18,7 +18,7 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import EmbeddingServerConfig
 
@@ -100,6 +100,39 @@ class EmbeddingServerManager:
         self._run_remote(f"rm -f {_REMOTE_METADATA_PATH}")
         logger.info("Embedding server stopped")
 
+    def redeploy(self, on_line: Optional[Callable[[str], None]] = None) -> None:
+        """Force a fresh container pull + restart regardless of current state.
+
+        Args:
+            on_line: Optional callback invoked with every line of remote
+                stdout (Docker pull / run output).  Best-effort: callback
+                exceptions are swallowed.
+        """
+        try:
+            import paramiko  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "paramiko is required for auto_deploy. "
+                "Install it with: pip install 'foretrieval[embedding_server]'"
+            ) from exc
+
+        logger.info("Force redeploying embedding server on %s", self.config.ssh_host)
+        self._deploy(on_line=on_line)
+
+    def is_running(self) -> bool:
+        """Return True iff the container is currently up."""
+        try:
+            return self._is_container_running()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def get_remote_metadata(self) -> Optional[dict]:
+        """Return the remote deployment metadata, or None if not deployed."""
+        try:
+            return self._read_remote_metadata()
+        except Exception:  # noqa: BLE001
+            return None
+
     def device_info(self) -> list[dict]:
         """Query the remote host for GPU info via ``nvidia-smi``.
 
@@ -140,24 +173,44 @@ class EmbeddingServerManager:
     # Deploy
     # ------------------------------------------------------------------
 
-    def _deploy(self) -> None:
-        """Pull image, resolve GPU count, run container, write metadata."""
+    def _deploy(self, on_line: Optional[Callable[[str], None]] = None) -> None:
+        """Pull image, resolve GPU count, run container, write metadata.
+
+        Args:
+            on_line: Optional callback for streaming remote stdout
+                (Docker pull / run output) into an interactive UI.
+        """
         # Resolve GPU count.
         n_gpus = self._resolve_n_gpus()
         logger.info("Using %d GPU(s) for tensor parallelism", n_gpus)
+        if on_line is not None:
+            try:
+                on_line(f"Using {n_gpus} GPU(s) for tensor parallelism")
+            except Exception:  # noqa: BLE001
+                pass
 
         # Stop any stale container first.
-        self._run_remote(f"docker stop {_CONTAINER_NAME} 2>/dev/null || true")
-        self._run_remote(f"docker rm {_CONTAINER_NAME} 2>/dev/null || true")
+        self._run_remote(f"docker stop {_CONTAINER_NAME} 2>/dev/null || true", on_line=on_line)
+        self._run_remote(f"docker rm {_CONTAINER_NAME} 2>/dev/null || true", on_line=on_line)
 
         # Pull image (no-op if already present).
         logger.info("Pulling %s", _VLLM_IMAGE)
-        self._run_remote(f"docker pull {_VLLM_IMAGE}")
+        if on_line is not None:
+            try:
+                on_line(f"Pulling {_VLLM_IMAGE} …")
+            except Exception:  # noqa: BLE001
+                pass
+        self._run_remote(f"docker pull {_VLLM_IMAGE}", on_line=on_line)
 
         # Build docker run command.
         cmd = self._build_docker_run_cmd(n_gpus)
         logger.info("Starting container: %s", cmd)
-        self._run_remote(cmd)
+        if on_line is not None:
+            try:
+                on_line("Starting container …")
+            except Exception:  # noqa: BLE001
+                pass
+        self._run_remote(cmd, on_line=on_line)
 
         # Write metadata.
         metadata = {
@@ -170,6 +223,11 @@ class EmbeddingServerManager:
         }
         self._write_remote_metadata(metadata)
         logger.info("Deployment complete — server starting up on port %d", self.config.port)
+        if on_line is not None:
+            try:
+                on_line("Deployment complete.")
+            except Exception:  # noqa: BLE001
+                pass
 
     def _build_docker_run_cmd(self, n_gpus: int) -> str:
         cfg = self.config
@@ -292,18 +350,42 @@ class EmbeddingServerManager:
         self._ssh = client
         return client
 
-    def _run_remote(self, cmd: str) -> tuple[str, str]:
+    def _run_remote(
+        self,
+        cmd: str,
+        on_line: Optional[Callable[[str], None]] = None,
+    ) -> tuple[str, str]:
         """Run a shell command on the remote host and return (stdout, stderr).
 
         Raises RuntimeError if the exit code is non-zero (for commands that
         don't have their own || true fallback).
+
+        When ``on_line`` is provided, stdout is streamed line by line and the
+        callback is invoked for each.  Useful for surfacing Docker output in
+        interactive UIs.  Callback exceptions are swallowed.
         """
         ssh = self._get_ssh()
         logger.debug("Remote: %s", cmd)
         _, stdout_f, stderr_f = ssh.exec_command(cmd)
-        exit_code = stdout_f.channel.recv_exit_status()
-        stdout = stdout_f.read().decode("utf-8", errors="replace")
-        stderr = stderr_f.read().decode("utf-8", errors="replace")
+
+        if on_line is None:
+            exit_code = stdout_f.channel.recv_exit_status()
+            stdout = stdout_f.read().decode("utf-8", errors="replace")
+            stderr = stderr_f.read().decode("utf-8", errors="replace")
+        else:
+            collected: list[str] = []
+            for raw in iter(stdout_f.readline, ""):
+                if not raw:
+                    break
+                collected.append(raw)
+                try:
+                    on_line(raw.rstrip("\n"))
+                except Exception:  # noqa: BLE001
+                    pass
+            exit_code = stdout_f.channel.recv_exit_status()
+            stdout = "".join(collected)
+            stderr = stderr_f.read().decode("utf-8", errors="replace")
+
         if stderr:
             logger.debug("Remote stderr: %s", stderr[:300])
         if exit_code != 0 and "|| true" not in cmd and "2>/dev/null" not in cmd:

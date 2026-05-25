@@ -26,7 +26,7 @@ def _make_manager(**cfg_kwargs) -> VectorDBServerManager:
 
 def _fake_run_factory(responses: dict):
     """Return a _run_remote mock whose stdout depends on substrings in the command."""
-    def _fake_run(cmd: str) -> tuple[str, str]:
+    def _fake_run(cmd: str, on_line=None) -> tuple[str, str]:
         for substring, output in responses.items():
             if substring in cmd:
                 return output, ""
@@ -64,7 +64,7 @@ class TestDeployFromScratch:
 
         # _run_remote returns __MISSING__ for metadata cat, "true" for docker inspect
         calls = []
-        def fake_run(cmd: str):
+        def fake_run(cmd: str, on_line=None):
             calls.append(cmd)
             if "cat" in cmd and "db_deployment" in cmd:
                 return "__MISSING__", ""
@@ -92,7 +92,7 @@ class TestDeployFromScratch:
 
         meta = json.dumps({"deployed_at": "2026-01-01T00:00:00+00:00"})
 
-        def fake_run(cmd: str):
+        def fake_run(cmd: str, on_line=None):
             if "cat" in cmd and "db_deployment" in cmd:
                 return meta, ""
             if "docker inspect" in cmd:
@@ -114,7 +114,7 @@ class TestDeployFromScratch:
         meta = json.dumps({"deployed_at": "2026-01-01T00:00:00+00:00"})
         calls = []
 
-        def fake_run(cmd: str):
+        def fake_run(cmd: str, on_line=None):
             calls.append(cmd)
             if "cat" in cmd and "db_deployment" in cmd:
                 return meta, ""
@@ -171,9 +171,105 @@ class TestStop:
     def test_stop_sends_correct_commands(self):
         mgr = _make_manager()
         calls = []
-        mgr._run_remote = MagicMock(side_effect=lambda cmd: (calls.append(cmd), ("", ""))[1])
+        mgr._run_remote = MagicMock(side_effect=lambda cmd, on_line=None: (calls.append(cmd), ("", ""))[1])
         mgr.stop()
         all_cmds = " ".join(calls)
         assert "docker stop" in all_cmds
         assert "docker rm" in all_cmds
         assert "db_deployment" in all_cmds
+
+
+# ---------------------------------------------------------------------------
+# redeploy + on_line streaming
+# ---------------------------------------------------------------------------
+
+class TestRedeploy:
+    def test_redeploy_calls_deploy(self):
+        mgr = _make_manager()
+        mgr._deploy = MagicMock()
+        with patch.dict("sys.modules", {"paramiko": MagicMock()}):
+            mgr.redeploy()
+        mgr._deploy.assert_called_once()
+
+    def test_redeploy_forwards_on_line_callback(self):
+        mgr = _make_manager()
+        mgr._deploy = MagicMock()
+        cb = MagicMock()
+        with patch.dict("sys.modules", {"paramiko": MagicMock()}):
+            mgr.redeploy(on_line=cb)
+        mgr._deploy.assert_called_once()
+        # The callback was threaded through
+        assert mgr._deploy.call_args.kwargs.get("on_line") is cb
+
+    def test_redeploy_unconditionally_redeploys_running_container(self):
+        """Unlike ensure_deployed, redeploy() always rebuilds."""
+        mgr = _make_manager()
+
+        # _is_container_running returns True; ensure_deployed would no-op,
+        # but redeploy must still trigger _deploy.
+        mgr._is_container_running = MagicMock(return_value=True)
+        mgr._read_remote_metadata = MagicMock(return_value={"deployed_at": "x"})
+        mgr._deploy = MagicMock()
+        with patch.dict("sys.modules", {"paramiko": MagicMock()}):
+            mgr.redeploy()
+        mgr._deploy.assert_called_once()
+
+
+class TestOnLineStreaming:
+    def test_run_remote_streams_lines_when_callback_given(self):
+        """When on_line is provided, stdout is read line-by-line."""
+        mgr = _make_manager()
+
+        # Build a fake SSH client whose exec_command returns three lines
+        class _FakeChannel:
+            def recv_exit_status(self):
+                return 0
+
+        class _FakeStdout:
+            def __init__(self, lines):
+                self._lines = list(lines)
+                self.channel = _FakeChannel()
+
+            def readline(self):
+                if self._lines:
+                    return self._lines.pop(0)
+                return ""
+
+            def read(self):
+                return b""
+
+        fake_stdout = _FakeStdout(["Step 1/3\n", "Step 2/3\n", "Done\n"])
+        fake_stderr = MagicMock()
+        fake_stderr.read.return_value = b""
+        fake_ssh = MagicMock()
+        fake_ssh.exec_command.return_value = (None, fake_stdout, fake_stderr)
+        mgr._get_ssh = MagicMock(return_value=fake_ssh)
+
+        captured = []
+        stdout, stderr = mgr._run_remote("docker build .", on_line=captured.append)
+
+        assert captured == ["Step 1/3", "Step 2/3", "Done"]
+        assert "Step 1/3" in stdout
+        assert stderr == ""
+
+    def test_run_remote_buffered_when_no_callback(self):
+        """Default behaviour (no on_line) still reads the whole stdout at once."""
+        mgr = _make_manager()
+
+        class _FakeChannel:
+            def recv_exit_status(self):
+                return 0
+
+        class _FakeStdout:
+            channel = _FakeChannel()
+            def read(self):
+                return b"full output\n"
+
+        fake_stderr = MagicMock()
+        fake_stderr.read.return_value = b""
+        fake_ssh = MagicMock()
+        fake_ssh.exec_command.return_value = (None, _FakeStdout(), fake_stderr)
+        mgr._get_ssh = MagicMock(return_value=fake_ssh)
+
+        stdout, _ = mgr._run_remote("echo hi")
+        assert "full output" in stdout

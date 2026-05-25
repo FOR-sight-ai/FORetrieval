@@ -374,7 +374,7 @@ class TestEmbeddingServerManager:
         return EmbeddingServerManager(cfg)
 
     def _mock_ssh(self, manager: EmbeddingServerManager, remote_outputs: dict):
-        def fake_run(cmd):
+        def fake_run(cmd, on_line=None):
             for key, val in remote_outputs.items():
                 if key in cmd:
                     return val
@@ -523,6 +523,53 @@ class TestEmbeddingServerManager:
         mgr = self._make_manager()
         self._mock_ssh(mgr, {"nvidia-smi": ("", "")})
         assert mgr.device_info() == []
+
+    def test_redeploy_calls_deploy(self):
+        mgr = self._make_manager()
+        mgr._deploy = MagicMock()
+        with patch.dict("sys.modules", {"paramiko": MagicMock()}):
+            mgr.redeploy()
+        mgr._deploy.assert_called_once()
+
+    def test_redeploy_forwards_on_line_callback(self):
+        mgr = self._make_manager()
+        mgr._deploy = MagicMock()
+        cb = MagicMock()
+        with patch.dict("sys.modules", {"paramiko": MagicMock()}):
+            mgr.redeploy(on_line=cb)
+        assert mgr._deploy.call_args.kwargs.get("on_line") is cb
+
+    def test_run_remote_streams_lines_when_callback_given(self):
+        """When on_line is provided, stdout is read line-by-line."""
+        mgr = self._make_manager()
+
+        class _FakeChannel:
+            def recv_exit_status(self):
+                return 0
+
+        class _FakeStdout:
+            def __init__(self, lines):
+                self._lines = list(lines)
+                self.channel = _FakeChannel()
+
+            def readline(self):
+                if self._lines:
+                    return self._lines.pop(0)
+                return ""
+
+            def read(self):
+                return b""
+
+        fake_stdout = _FakeStdout(["pulling…\n", "complete\n"])
+        fake_stderr = MagicMock()
+        fake_stderr.read.return_value = b""
+        fake_ssh = MagicMock()
+        fake_ssh.exec_command.return_value = (None, fake_stdout, fake_stderr)
+        mgr._get_ssh = MagicMock(return_value=fake_ssh)
+
+        captured: list[str] = []
+        mgr._run_remote("docker pull vllm/vllm-openai", on_line=captured.append)
+        assert captured == ["pulling…", "complete"]
 
 
 # ---------------------------------------------------------------------------
