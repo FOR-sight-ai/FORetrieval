@@ -254,17 +254,44 @@ class VectorDBServerManager:
         if cfg.api_key:
             env_parts.append(f"-e FOR_DB_API_KEY={cfg.api_key}")
 
-        return (
-            f"docker run -d "
-            f"--name {_CONTAINER_NAME} "
+        # Run the container as the SSH user so files written under the
+        # bind-mounted data_dir have the same ownership as SFTP-uploaded
+        # files.  Falls back to the Docker default (root) if UID resolution
+        # fails, so existing deployments without SSH are unaffected.
+        uid, gid = self._resolve_remote_uid_gid()
+        user_flag = f"--user {uid}:{gid}" if uid is not None else ""
+
+        parts = [
+            "docker run -d",
+            f"--name {_CONTAINER_NAME}",
+        ]
+        if user_flag:
+            parts.append(user_flag)
+        parts += [
             # cfg.port  → host port (configurable, chosen by the caller)
             # _CONTAINER_INTERNAL_PORT → container port (fixed by the image)
-            f"-p {cfg.port}:{_CONTAINER_INTERNAL_PORT} "
-            f"-v {cfg.data_dir}:/data "
-            f"{' '.join(env_parts)} "
-            f"--restart unless-stopped "
-            f"{_IMAGE_NAME}"
-        )
+            f"-p {cfg.port}:{_CONTAINER_INTERNAL_PORT}",
+            f"-v {cfg.data_dir}:/data",
+            " ".join(env_parts),
+            "--restart unless-stopped",
+            _IMAGE_NAME,
+        ]
+        return " ".join(parts)
+
+    def _resolve_remote_uid_gid(self) -> tuple:
+        """Return ``(uid, gid)`` of the SSH user on the remote host.
+
+        Uses a single ``id -u && id -g`` call.  Returns ``(None, None)``
+        on any failure so callers can omit the ``--user`` flag gracefully.
+        """
+        try:
+            stdout, _ = self._run_remote("id -u && id -g")
+            lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
+            if len(lines) >= 2:
+                return int(lines[0]), int(lines[1])
+        except Exception:  # noqa: BLE001
+            pass
+        return None, None
 
     # ------------------------------------------------------------------
     # Build context upload

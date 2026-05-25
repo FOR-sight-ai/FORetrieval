@@ -25,6 +25,9 @@ def _make_manager(**cfg_kwargs) -> VectorDBServerManager:
     # don't accidentally trigger a real SSH connection through
     # _remote_home() -> sftp.normalize('.').
     mgr._cached_home = "/home/testuser"
+    # Stub UID/GID so _build_docker_run_cmd tests don't need SSH.
+    # Tests that specifically exercise the --user flag override this.
+    mgr._resolve_remote_uid_gid = MagicMock(return_value=(None, None))
     return mgr
 
 
@@ -165,6 +168,20 @@ class TestBuildDockerRunCmd:
         mgr = _make_manager()
         cmd = mgr._build_docker_run_cmd()
         assert f"--name {_CONTAINER_NAME}" in cmd
+
+    def test_user_flag_present_when_uid_resolved(self):
+        """When UID/GID can be resolved, --user uid:gid must appear."""
+        mgr = _make_manager()
+        mgr._resolve_remote_uid_gid = MagicMock(return_value=(1000, 1001))
+        cmd = mgr._build_docker_run_cmd()
+        assert "--user 1000:1001" in cmd
+
+    def test_user_flag_absent_when_uid_unknown(self):
+        """When resolution fails (returns None, None), no --user flag."""
+        mgr = _make_manager()
+        # _resolve_remote_uid_gid already returns (None, None) from _make_manager
+        cmd = mgr._build_docker_run_cmd()
+        assert "--user" not in cmd
 
 
 # ---------------------------------------------------------------------------
