@@ -164,42 +164,6 @@ class EmbeddingServerManager:
         except Exception:  # noqa: BLE001
             return None
 
-    def device_info(self) -> list[dict]:
-        """Query the remote host for GPU info via ``nvidia-smi``.
-
-        Returns a list of dicts with keys
-        ``name, memory_used_mib, memory_total_mib, utilization_pct, index``,
-        one per visible GPU on the remote host.  Returns ``[]`` when no GPU
-        is detected (or when nvidia-smi is unavailable).  Never raises —
-        callers can safely show "no info" on failure.
-        """
-        query = (
-            "nvidia-smi --query-gpu=index,name,memory.used,memory.total,utilization.gpu "
-            "--format=csv,noheader,nounits 2>/dev/null"
-        )
-        try:
-            stdout, _ = self._run_remote(query)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("device_info: SSH/nvidia-smi failed: %s", exc)
-            return []
-
-        result: list[dict] = []
-        for line in stdout.splitlines():
-            parts = [p.strip() for p in line.split(",")]
-            if len(parts) < 5:
-                continue
-            try:
-                result.append({
-                    "index": int(parts[0]),
-                    "name": parts[1],
-                    "memory_used_mib": int(parts[2]),
-                    "memory_total_mib": int(parts[3]),
-                    "utilization_pct": int(parts[4]),
-                })
-            except (ValueError, IndexError):
-                continue
-        return result
-
     # ------------------------------------------------------------------
     # Deploy
     # ------------------------------------------------------------------

@@ -498,37 +498,6 @@ class TestEmbeddingServerManager:
             with pytest.raises(ImportError, match="paramiko"):
                 mgr.ensure_deployed()
 
-    def test_device_info_parses_nvidia_smi_csv(self):
-        """device_info() should parse nvidia-smi CSV output into structured dicts."""
-        mgr = self._make_manager()
-        csv = (
-            "0, NVIDIA H100 80GB HBM3, 12345, 81559, 42\n"
-            "1, NVIDIA H100 80GB HBM3, 0, 81559, 0\n"
-        )
-        self._mock_ssh(mgr, {"nvidia-smi": (csv, "")})
-
-        info = mgr.device_info()
-
-        assert len(info) == 2
-        assert info[0]["index"] == 0
-        assert info[0]["name"] == "NVIDIA H100 80GB HBM3"
-        assert info[0]["memory_used_mib"] == 12345
-        assert info[0]["memory_total_mib"] == 81559
-        assert info[0]["utilization_pct"] == 42
-        assert info[1]["memory_used_mib"] == 0
-
-    def test_device_info_returns_empty_on_ssh_error(self):
-        """device_info() must never raise; SSH failures map to []."""
-        mgr = self._make_manager()
-        mgr._run_remote = MagicMock(side_effect=RuntimeError("ssh down"))
-        assert mgr.device_info() == []
-
-    def test_device_info_returns_empty_on_no_gpu_output(self):
-        """No GPUs detected (empty CSV) → []."""
-        mgr = self._make_manager()
-        self._mock_ssh(mgr, {"nvidia-smi": ("", "")})
-        assert mgr.device_info() == []
-
     def test_redeploy_calls_deploy(self):
         mgr = self._make_manager()
         mgr._deploy = MagicMock()
