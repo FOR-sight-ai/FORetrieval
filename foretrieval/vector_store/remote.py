@@ -160,10 +160,28 @@ class RemoteVectorStore(VectorStore):
     # ------------------------------------------------------------------
 
     def export_sidecar(self, index_path: Path) -> None:
-        """No-op — data lives on the server."""
+        """No-op — vector data lives on the server."""
 
     def load_sidecar(self, index_path: Path) -> None:
-        """No-op — data lives on the server."""
+        """No-op — vector data lives on the server."""
+
+    # ------------------------------------------------------------------
+    # Index-level bookkeeping — round-tripped to the server so the client
+    # needs no local index directory.
+    # ------------------------------------------------------------------
+
+    def supports_remote_bookkeeping(self) -> bool:
+        return True
+
+    def export_bookkeeping(self, blob: Dict[str, Any]) -> None:
+        if self._index_name is None:
+            raise RuntimeError("Call open() before export_bookkeeping()")
+        self._client.put_bookkeeping(self._index_name, blob)
+
+    def load_bookkeeping(self) -> Optional[Dict[str, Any]]:
+        if self._index_name is None:
+            raise RuntimeError("Call open() before load_bookkeeping()")
+        return self._client.get_bookkeeping(self._index_name)
 
     # ------------------------------------------------------------------
     # Internal accessors (for ColPaliModel compatibility checks)

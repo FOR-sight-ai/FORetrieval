@@ -132,6 +132,15 @@ def _write_meta(index_name: str, meta: Dict[str, Any]) -> None:
     p.write_text(json.dumps(meta))
 
 
+def _bookkeeping_path(index_name: str) -> Path:
+    """Return the path to the ColPali bookkeeping blob for a collection.
+
+    Stored as a torch.save'd dict alongside ``index.json`` so the client no
+    longer needs a local index directory in remote mode.
+    """
+    return _DATA_DIR / index_name / "bookkeeping.pt"
+
+
 def _inject_scorer(vs: Any) -> None:
     """Inject the server-side MAX_SIM scorer into a LocalVectorStore."""
     from ..vector_store.local import LocalVectorStore
@@ -334,6 +343,49 @@ async def delete_collection(name: str):
 
         _locks.pop(name, None)
         return {"deleted": True}
+
+
+# ------------------------------------------------------------------
+# Bookkeeping (ColPali index-level metadata, stored server-side)
+# ------------------------------------------------------------------
+
+@app.put("/v1/collection/{name}/bookkeeping")
+async def put_bookkeeping(name: str, request: Request):
+    """Persist the ColPali bookkeeping blob (torch.save bytes body).
+
+    The blob is a dict of index-level metadata (model name, doc metadata,
+    file-name map, per-embedding extras, …) that previously lived in local
+    sidecar files on the client.  Stored under ``<data_dir>/<name>/``.
+    """
+    data = await request.body()
+    blob = _loads(data)
+
+    async with _get_lock(name):
+        path = _bookkeeping_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(blob, path)
+        _invalidate_size_cache(_DATA_DIR / name)
+
+    return {"stored": True}
+
+
+@app.get("/v1/collection/{name}/bookkeeping")
+async def get_bookkeeping(name: str):
+    """Return the ColPali bookkeeping blob for a collection.
+
+    Returns 404 if no bookkeeping has been stored.  Response body is the
+    torch.save'd blob.
+    """
+    async with _get_lock(name):
+        path = _bookkeeping_path(name)
+        if not path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"No bookkeeping stored for collection '{name}'.",
+            )
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+
+    return Response(content=_dumps(blob), media_type="application/octet-stream")
 
 
 # ------------------------------------------------------------------

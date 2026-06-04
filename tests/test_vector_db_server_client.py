@@ -255,3 +255,39 @@ class TestFetchVector:
 
         result = client.fetch_vector("idx", 99999)
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Bookkeeping
+# ---------------------------------------------------------------------------
+
+class TestBookkeeping:
+    def test_put_bookkeeping_sends_octet_stream(self):
+        client = _make_client()
+        resp = _make_mock_json_response(200, {"stored": True})
+        client._client.put = MagicMock(return_value=resp)
+
+        blob = {"index_config": {"model_name": "m"}, "doc_id_to_metadata": {1: {"t": "x"}}}
+        client.put_bookkeeping("idx", blob)
+
+        call = client._client.put.call_args
+        assert call.args[0].endswith("/v1/collection/idx/bookkeeping")
+        body = call.kwargs["content"]
+        assert _loads(body)["index_config"]["model_name"] == "m"
+
+    def test_get_bookkeeping_returns_blob(self):
+        client = _make_client()
+        blob = {"index_config": {"model_name": "m"}}
+        resp = _make_mock_bytes_response(200, _dumps(blob))
+        client._client.get = MagicMock(return_value=resp)
+
+        out = client.get_bookkeeping("idx")
+        assert out["index_config"]["model_name"] == "m"
+
+    def test_get_bookkeeping_returns_none_on_404(self):
+        client = _make_client()
+        resp = MagicMock()
+        resp.status_code = 404
+        client._client.get = MagicMock(return_value=resp)
+
+        assert client.get_bookkeeping("idx") is None

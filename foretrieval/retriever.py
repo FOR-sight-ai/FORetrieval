@@ -109,6 +109,7 @@ class MultiModalRetrieverModel:
         device: str = "cuda",
         verbose: int = 1,
         embedding_server: Optional[EmbeddingServerConfig] = None,
+        storage_backend: Optional[str] = None,
         storage_config: Optional[Dict[str, Any]] = None,
     ):
         """Load an index and the associated model from disk.
@@ -119,6 +120,10 @@ class MultiModalRetrieverModel:
             device (str): The device to load the model on. Default is "cuda".
             embedding_server (Optional[EmbeddingServerConfig]): If set, embeddings are computed
                 on the remote vLLM server instead of locally.
+            storage_backend (Optional[str]): Force a storage backend. When set to
+                "remote", the index state (model name, bookkeeping) is loaded from
+                the vector_db_server instead of a local index directory.  When None
+                the backend is read from the saved index_config.json.gz.
             storage_config (Optional[Dict]): Backend-specific overrides (e.g. Milvus candidate_limit).
                 The storage_backend is read from the saved index_config.json.gz automatically.
 
@@ -133,6 +138,7 @@ class MultiModalRetrieverModel:
             device=device,
             verbose=verbose,
             embedding_server=embedding_server,
+            storage_backend=storage_backend,
             storage_config=storage_config,
         )
         return instance
