@@ -22,15 +22,20 @@ import tarfile
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from .config import VectorDBServerConfig
 
 logger = logging.getLogger(__name__)
 
-# Remote paths and container constants
-_REMOTE_METADATA_PATH = "~/.foretrieval/db_deployment.json"
-_REMOTE_BUILD_DIR = "~/foretrieval_db_build"
+# Remote paths and container constants.
+#
+# Paths are intentionally relative.  They are joined to the SSH user's
+# absolute home directory (obtained via ``sftp.normalize('.')`` so that
+# SFTP put / get commands receive a real absolute path — SFTP does NOT
+# expand ``~``, unlike the remote shell.
+_REMOTE_METADATA_SUBPATH = ".foretrieval/db_deployment.json"
+_REMOTE_BUILD_SUBDIR = "foretrieval_db_build"
 _CONTAINER_NAME = "foretrieval_vector_db_server"
 _IMAGE_NAME = "foretrieval-vector-db:local"
 
@@ -56,6 +61,33 @@ class VectorDBServerManager:
             raise ValueError("VectorDBServerManager requires ssh_host in config")
         self.config = config
         self._ssh: Optional[object] = None  # paramiko.SSHClient, lazy
+        self._cached_home: Optional[str] = None  # remote $HOME, lazy
+        # Absolute remote build dir, set by _upload_build_context() once
+        # _remote_home() has been resolved.  Read by _deploy() and tests.
+        self._remote_build_dir: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Remote path helpers
+    # ------------------------------------------------------------------
+
+    def _remote_home(self) -> str:
+        """Return the SSH user's absolute home directory on the remote host.
+
+        Resolved once per manager instance via ``sftp.normalize('.')``.
+        """
+        if self._cached_home is not None:
+            return self._cached_home
+        ssh = self._get_ssh()
+        sftp = ssh.open_sftp()
+        try:
+            self._cached_home = sftp.normalize(".")
+        finally:
+            sftp.close()
+        return self._cached_home
+
+    def _metadata_path(self) -> str:
+        """Return the absolute path to the remote deployment-metadata file."""
+        return f"{self._remote_home()}/{_REMOTE_METADATA_SUBPATH}"
 
     # ------------------------------------------------------------------
     # Public API
@@ -96,41 +128,101 @@ class VectorDBServerManager:
                 logger.warning("Container not running — redeploying")
                 self._deploy()
 
+    def redeploy(self, on_line: Optional[Callable[[str], None]] = None) -> None:
+        """Force a fresh build + container restart regardless of current state.
+
+        Unlike :py:meth:`ensure_deployed`, this always rebuilds the image and
+        restarts the container.  Use it after pulling new FORetrieval source
+        on the local machine.
+
+        Args:
+            on_line: Optional callback invoked with every line of remote
+                stdout (Docker pull / build / run output).  Best-effort:
+                callback exceptions are swallowed.
+        """
+        try:
+            import paramiko  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "paramiko is required for auto_deploy. "
+                "Install it with: pip install 'foretrieval[vector_db_server]'"
+            ) from exc
+
+        logger.info(
+            "Force redeploying vector-DB server on %s", self.config.ssh_host
+        )
+        self._deploy(on_line=on_line)
+
+    def is_running(self) -> bool:
+        """Return True iff the container is currently up."""
+        try:
+            return self._is_container_running()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def get_remote_metadata(self) -> Optional[dict]:
+        """Return the remote deployment metadata, or None if not deployed."""
+        try:
+            return self._read_remote_metadata()
+        except Exception:  # noqa: BLE001
+            return None
+
     def stop(self) -> None:
         """Stop and remove the Docker container; delete metadata file."""
         logger.info("Stopping vector-DB server on %s", self.config.ssh_host)
         self._run_remote(f"docker stop {_CONTAINER_NAME} 2>/dev/null || true")
         self._run_remote(f"docker rm {_CONTAINER_NAME} 2>/dev/null || true")
-        self._run_remote(f"rm -f {_REMOTE_METADATA_PATH}")
+        self._run_remote(f"rm -f {self._metadata_path()}")
         logger.info("Vector-DB server stopped")
 
     # ------------------------------------------------------------------
     # Deploy
     # ------------------------------------------------------------------
 
-    def _deploy(self) -> None:
-        """Upload source, build image, run container, write metadata."""
+    def _deploy(self, on_line: Optional[Callable[[str], None]] = None) -> None:
+        """Upload source, build image, run container, write metadata.
+
+        Args:
+            on_line: Optional callback invoked with every line of remote
+                stdout produced by the long-running build/run commands.
+        """
         # Stop stale container
-        self._run_remote(f"docker stop {_CONTAINER_NAME} 2>/dev/null || true")
-        self._run_remote(f"docker rm {_CONTAINER_NAME} 2>/dev/null || true")
+        self._run_remote(f"docker stop {_CONTAINER_NAME} 2>/dev/null || true", on_line=on_line)
+        self._run_remote(f"docker rm {_CONTAINER_NAME} 2>/dev/null || true", on_line=on_line)
 
         # Upload foretrieval source + Dockerfile to remote build dir
+        if on_line is not None:
+            try:
+                on_line("Uploading build context …")
+            except Exception:  # noqa: BLE001
+                pass
         self._upload_build_context()
 
         # Build Docker image on the remote host
         logger.info("Building Docker image '%s' on %s …", _IMAGE_NAME, self.config.ssh_host)
+        if on_line is not None:
+            try:
+                on_line(f"Building image {_IMAGE_NAME} …")
+            except Exception:  # noqa: BLE001
+                pass
         self._run_remote(
-            f"cd {_REMOTE_BUILD_DIR} && "
-            f"docker build -t {_IMAGE_NAME} -f Dockerfile.vector_db ."
+            f"cd {self._remote_build_dir} && "
+            f"docker build -t {_IMAGE_NAME} -f Dockerfile.vector_db .",
+            on_line=on_line,
         )
 
         # Create data directory on remote
-        self._run_remote(f"mkdir -p {self.config.data_dir}")
+        self._run_remote(f"mkdir -p {self.config.data_dir}", on_line=on_line)
 
         # Run container
         cmd = self._build_docker_run_cmd()
         logger.info("Starting container: %s", cmd)
-        self._run_remote(cmd)
+        if on_line is not None:
+            try:
+                on_line("Starting container …")
+            except Exception:  # noqa: BLE001
+                pass
+        self._run_remote(cmd, on_line=on_line)
 
         # Write metadata
         metadata = {
@@ -144,6 +236,11 @@ class VectorDBServerManager:
         logger.info(
             "Deployment complete — server starting on port %d", self.config.port
         )
+        if on_line is not None:
+            try:
+                on_line("Deployment complete.")
+            except Exception:  # noqa: BLE001
+                pass
 
     def _build_docker_run_cmd(self) -> str:
         cfg = self.config
@@ -157,17 +254,44 @@ class VectorDBServerManager:
         if cfg.api_key:
             env_parts.append(f"-e FOR_DB_API_KEY={cfg.api_key}")
 
-        return (
-            f"docker run -d "
-            f"--name {_CONTAINER_NAME} "
+        # Run the container as the SSH user so files written under the
+        # bind-mounted data_dir have the same ownership as SFTP-uploaded
+        # files.  Falls back to the Docker default (root) if UID resolution
+        # fails, so existing deployments without SSH are unaffected.
+        uid, gid = self._resolve_remote_uid_gid()
+        user_flag = f"--user {uid}:{gid}" if uid is not None else ""
+
+        parts = [
+            "docker run -d",
+            f"--name {_CONTAINER_NAME}",
+        ]
+        if user_flag:
+            parts.append(user_flag)
+        parts += [
             # cfg.port  → host port (configurable, chosen by the caller)
             # _CONTAINER_INTERNAL_PORT → container port (fixed by the image)
-            f"-p {cfg.port}:{_CONTAINER_INTERNAL_PORT} "
-            f"-v {cfg.data_dir}:/data "
-            f"{' '.join(env_parts)} "
-            f"--restart unless-stopped "
-            f"{_IMAGE_NAME}"
-        )
+            f"-p {cfg.port}:{_CONTAINER_INTERNAL_PORT}",
+            f"-v {cfg.data_dir}:/data",
+            " ".join(env_parts),
+            "--restart unless-stopped",
+            _IMAGE_NAME,
+        ]
+        return " ".join(parts)
+
+    def _resolve_remote_uid_gid(self) -> tuple:
+        """Return ``(uid, gid)`` of the SSH user on the remote host.
+
+        Uses a single ``id -u && id -g`` call.  Returns ``(None, None)``
+        on any failure so callers can omit the ``--user`` flag gracefully.
+        """
+        try:
+            stdout, _ = self._run_remote("id -u && id -g")
+            lines = [ln.strip() for ln in stdout.strip().splitlines() if ln.strip()]
+            if len(lines) >= 2:
+                return int(lines[0]), int(lines[1])
+        except Exception:  # noqa: BLE001
+            pass
+        return None, None
 
     # ------------------------------------------------------------------
     # Build context upload
@@ -203,20 +327,27 @@ class VectorDBServerManager:
             if pyproject.exists():
                 tar.add(pyproject, arcname="pyproject.toml")
 
-        logger.info("Uploading build context to %s:%s …", self.config.ssh_host, _REMOTE_BUILD_DIR)
+        # Resolve the absolute remote build directory.  SFTP does NOT expand
+        # ``~`` (unlike the remote shell), so we must compute the absolute
+        # path explicitly via the SSH user's home directory.
+        remote_dir = f"{self._remote_home()}/{_REMOTE_BUILD_SUBDIR}"
+        self._remote_build_dir = remote_dir
+
+        logger.info("Uploading build context to %s:%s …", self.config.ssh_host, remote_dir)
         ssh = self._get_ssh()
+        # Ensure remote dir exists (shell expansion not needed any more,
+        # but a missing parent would still ENOENT below).
+        self._run_remote(f"mkdir -p {remote_dir}")
         sftp = ssh.open_sftp()
         try:
-            # Ensure remote dir exists
-            self._run_remote(f"mkdir -p {_REMOTE_BUILD_DIR}")
-            sftp.put(tmp_path, f"{_REMOTE_BUILD_DIR.replace('~', '')}/build_context.tar.gz".replace("//", "/"))
+            sftp.put(tmp_path, f"{remote_dir}/build_context.tar.gz")
         finally:
             sftp.close()
             os.unlink(tmp_path)
 
         # Extract on remote
         self._run_remote(
-            f"cd {_REMOTE_BUILD_DIR} && "
+            f"cd {remote_dir} && "
             f"tar -xzf build_context.tar.gz && "
             f"rm build_context.tar.gz"
         )
@@ -239,8 +370,9 @@ class VectorDBServerManager:
     # ------------------------------------------------------------------
 
     def _read_remote_metadata(self) -> Optional[dict]:
+        path = self._metadata_path()
         stdout, _ = self._run_remote(
-            f"cat {_REMOTE_METADATA_PATH} 2>/dev/null || echo '__MISSING__'"
+            f"cat {path} 2>/dev/null || echo '__MISSING__'"
         )
         text = stdout.strip()
         if text == "__MISSING__" or not text:
@@ -252,10 +384,11 @@ class VectorDBServerManager:
             return None
 
     def _write_remote_metadata(self, metadata: dict) -> None:
+        path = self._metadata_path()
         json_str = json.dumps(metadata).replace("'", "'\\''")
         self._run_remote(
-            f"mkdir -p $(dirname {_REMOTE_METADATA_PATH}) && "
-            f"echo '{json_str}' > {_REMOTE_METADATA_PATH}"
+            f"mkdir -p $(dirname {path}) && "
+            f"echo '{json_str}' > {path}"
         )
 
     # ------------------------------------------------------------------
@@ -263,34 +396,56 @@ class VectorDBServerManager:
     # ------------------------------------------------------------------
 
     def _get_ssh(self):
-        """Return a connected paramiko SSHClient (lazy init)."""
-        import paramiko
+        """Return a connected paramiko SSHClient (lazy init).
 
+        Honours ``~/.ssh/config`` (Host aliases, User, Port, IdentityFile,
+        ProxyCommand, ProxyJump) via :py:func:`foretrieval.ssh_utils.open_ssh_client`.
+        """
         if self._ssh is not None:
             return self._ssh
 
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        from ..ssh_utils import open_ssh_client
+        self._ssh = open_ssh_client(
+            ssh_host=self.config.ssh_host,
+            ssh_user=self.config.ssh_user,
+            ssh_key_path=self.config.ssh_key_path,
+        )
+        return self._ssh
 
-        connect_kwargs: dict = {
-            "hostname": self.config.ssh_host,
-            "username": self.config.ssh_user or os.environ.get("USER", "root"),
-        }
-        if self.config.ssh_key_path:
-            connect_kwargs["key_filename"] = self.config.ssh_key_path
+    def _run_remote(
+        self,
+        cmd: str,
+        on_line: Optional[Callable[[str], None]] = None,
+    ) -> tuple[str, str]:
+        """Run a shell command on the remote host; return (stdout, stderr).
 
-        client.connect(**connect_kwargs)
-        self._ssh = client
-        return client
-
-    def _run_remote(self, cmd: str) -> tuple[str, str]:
-        """Run a shell command on the remote host; return (stdout, stderr)."""
+        When ``on_line`` is provided, stdout is streamed line by line and the
+        callback is invoked for each.  Useful for surfacing Docker build
+        progress in interactive UIs.  Callback exceptions are swallowed.
+        """
         ssh = self._get_ssh()
         logger.debug("Remote: %s", cmd)
         _, stdout_f, stderr_f = ssh.exec_command(cmd)
-        exit_code = stdout_f.channel.recv_exit_status()
-        stdout = stdout_f.read().decode("utf-8", errors="replace")
-        stderr = stderr_f.read().decode("utf-8", errors="replace")
+
+        if on_line is None:
+            exit_code = stdout_f.channel.recv_exit_status()
+            stdout = stdout_f.read().decode("utf-8", errors="replace")
+            stderr = stderr_f.read().decode("utf-8", errors="replace")
+        else:
+            collected: list[str] = []
+            # Stream stdout
+            for raw in iter(stdout_f.readline, ""):
+                if not raw:
+                    break
+                collected.append(raw)
+                try:
+                    on_line(raw.rstrip("\n"))
+                except Exception:  # noqa: BLE001
+                    pass
+            exit_code = stdout_f.channel.recv_exit_status()
+            stdout = "".join(collected)
+            stderr = stderr_f.read().decode("utf-8", errors="replace")
+
         if stderr:
             logger.debug("Remote stderr: %s", stderr[:300])
         if exit_code != 0 and "|| true" not in cmd and "2>/dev/null" not in cmd:

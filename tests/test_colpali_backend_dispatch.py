@@ -336,34 +336,39 @@ class TestRemoteBackendDispatch:
         assert not hasattr(model.vector_store, "set_processor")
 
     def test_export_index_writes_remote_backend(self, tmp_path):
-        import srsly
+        """Remote mode stores bookkeeping on the server, not in a local dir."""
         model, _ = self._make_remote_model()
         model.index_root = str(tmp_path)
         model.index_name = "test_export_remote"
-        model.doc_id_to_metadata = {}
-        model.doc_ids_to_file_names = {}
+        model.doc_id_to_metadata = {1: {"title": "A"}}
+        model.doc_ids_to_file_names = {1: "a.pdf"}
         model.embed_id_to_extra = {}
         model.full_document_collection = False
         model.max_image_width = None
         model.max_image_height = None
-        model.highest_doc_id = -1
+        model.highest_doc_id = 1
         model.model_name = "vidore/colpali-v1.2"
-        # storage_config set on model (url present, no api_key)
         model.storage_config = {"url": "http://localhost:18000", "backend": "qdrant"}
 
-        model.vector_store = MagicMock()
+        mock_store = MagicMock()
+        mock_store.supports_remote_bookkeeping.return_value = True
+        mock_store.load_bookkeeping.return_value = None
+        model.vector_store = mock_store
+
         model._export_index()
 
-        cfg = srsly.read_gzip_json(
-            tmp_path / "test_export_remote" / "index_config.json.gz"
-        )
-        assert cfg["storage_backend"] == "remote"
-        # api_key must NOT be in persisted storage_config
-        persisted = cfg.get("storage_config") or {}
-        assert "api_key" not in persisted
+        # No local index directory should have been created.
+        assert not (tmp_path / "test_export_remote").exists()
+        # The bookkeeping blob must have been pushed to the server.
+        mock_store.export_bookkeeping.assert_called_once()
+        blob = mock_store.export_bookkeeping.call_args.args[0]
+        assert blob["index_config"]["storage_backend"] == "remote"
+        assert blob["doc_ids_to_file_names"] == {1: "a.pdf"}
+        # storage_config (with any credentials) must NOT be persisted in bookkeeping.
+        assert blob["index_config"].get("storage_config") is None
 
     def test_export_index_strips_api_key(self, tmp_path):
-        import srsly
+        """Connection config (incl. api_key) is never persisted in bookkeeping."""
         model, _ = self._make_remote_model()
         model.index_root = str(tmp_path)
         model.index_name = "test_strip_key"
@@ -381,15 +386,17 @@ class TestRemoteBackendDispatch:
             "api_key": "supersecret",
         }
 
-        model.vector_store = MagicMock()
+        mock_store = MagicMock()
+        mock_store.supports_remote_bookkeeping.return_value = True
+        mock_store.load_bookkeeping.return_value = None
+        model.vector_store = mock_store
+
         model._export_index()
 
-        cfg = srsly.read_gzip_json(
-            tmp_path / "test_strip_key" / "index_config.json.gz"
-        )
-        persisted = cfg.get("storage_config") or {}
-        assert "api_key" not in persisted
-        assert persisted.get("url") == "http://localhost:18000"
+        blob = mock_store.export_bookkeeping.call_args.args[0]
+        # No connection config / api_key anywhere in the persisted blob.
+        assert blob["index_config"].get("storage_config") is None
+        assert "supersecret" not in str(blob)
 
     def test_indexed_embeddings_returns_empty_for_remote(self):
         model, _ = self._make_remote_model()

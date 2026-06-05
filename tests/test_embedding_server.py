@@ -371,10 +371,15 @@ class TestEmbeddingServerManager:
         defaults = dict(auto_deploy=True, ssh_host=_TEST_SSH_HOST, n_gpus=-1)
         defaults.update(kwargs)
         cfg = _make_config(**defaults)
-        return EmbeddingServerManager(cfg)
+        mgr = EmbeddingServerManager(cfg)
+        # Stub the remote-home resolution so tests that mock _run_remote
+        # don't accidentally trigger a real SSH connection through
+        # _remote_home() -> sftp.normalize('.').
+        mgr._cached_home = "/home/testuser"
+        return mgr
 
     def _mock_ssh(self, manager: EmbeddingServerManager, remote_outputs: dict):
-        def fake_run(cmd):
+        def fake_run(cmd, on_line=None):
             for key, val in remote_outputs.items():
                 if key in cmd:
                     return val
@@ -492,6 +497,91 @@ class TestEmbeddingServerManager:
         with patch.dict("sys.modules", {"paramiko": None}):
             with pytest.raises(ImportError, match="paramiko"):
                 mgr.ensure_deployed()
+
+    def test_redeploy_calls_deploy(self):
+        mgr = self._make_manager()
+        mgr._deploy = MagicMock()
+        with patch.dict("sys.modules", {"paramiko": MagicMock()}):
+            mgr.redeploy()
+        mgr._deploy.assert_called_once()
+
+    def test_redeploy_forwards_on_line_callback(self):
+        mgr = self._make_manager()
+        mgr._deploy = MagicMock()
+        cb = MagicMock()
+        with patch.dict("sys.modules", {"paramiko": MagicMock()}):
+            mgr.redeploy(on_line=cb)
+        assert mgr._deploy.call_args.kwargs.get("on_line") is cb
+
+    def test_run_remote_streams_lines_when_callback_given(self):
+        """When on_line is provided, stdout is read line-by-line."""
+        mgr = self._make_manager()
+
+        class _FakeChannel:
+            def recv_exit_status(self):
+                return 0
+
+        class _FakeStdout:
+            def __init__(self, lines):
+                self._lines = list(lines)
+                self.channel = _FakeChannel()
+
+            def readline(self):
+                if self._lines:
+                    return self._lines.pop(0)
+                return ""
+
+            def read(self):
+                return b""
+
+        fake_stdout = _FakeStdout(["pulling…\n", "complete\n"])
+        fake_stderr = MagicMock()
+        fake_stderr.read.return_value = b""
+        fake_ssh = MagicMock()
+        fake_ssh.exec_command.return_value = (None, fake_stdout, fake_stderr)
+        mgr._get_ssh = MagicMock(return_value=fake_ssh)
+
+        captured: list[str] = []
+        mgr._run_remote("docker pull vllm/vllm-openai", on_line=captured.append)
+        assert captured == ["pulling…", "complete"]
+
+    def test_get_ssh_delegates_to_open_ssh_client(self):
+        """_get_ssh must call foretrieval.ssh_utils.open_ssh_client.
+
+        Regression test for the bug where paramiko was given a raw alias
+        and DNS-failed for entries that only existed in ~/.ssh/config.
+        """
+        mgr = self._make_manager(ssh_user="alice", ssh_key_path="/k")
+        fake_client = MagicMock()
+        with patch("foretrieval.ssh_utils.open_ssh_client",
+                   return_value=fake_client) as mock_open:
+            result = mgr._get_ssh()
+        mock_open.assert_called_once_with(
+            ssh_host=_TEST_SSH_HOST,
+            ssh_user="alice",
+            ssh_key_path="/k",
+        )
+        assert result is fake_client
+
+    def test_remote_home_uses_sftp_normalize(self):
+        mgr = self._make_manager()
+        mgr._cached_home = None  # reset the stub from _make_manager
+
+        fake_sftp = MagicMock()
+        fake_sftp.normalize.return_value = "/home/alice"
+        fake_ssh = MagicMock()
+        fake_ssh.open_sftp.return_value = fake_sftp
+        mgr._get_ssh = MagicMock(return_value=fake_ssh)
+
+        assert mgr._remote_home() == "/home/alice"
+        fake_sftp.normalize.assert_called_once_with(".")
+
+    def test_metadata_path_is_absolute(self):
+        mgr = self._make_manager()  # _cached_home = "/home/testuser"
+        path = mgr._metadata_path()
+        assert path.startswith("/home/testuser/")
+        assert "~" not in path
+        assert path.endswith("deployment.json")
 
 
 # ---------------------------------------------------------------------------

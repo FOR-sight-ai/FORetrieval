@@ -261,3 +261,58 @@ class TestDeleteCollection:
     def test_delete_nonexistent_ok(self, client):
         r = client.delete("/v1/collection/ghost_col")
         assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Bookkeeping (server-side ColPali index metadata)
+# ---------------------------------------------------------------------------
+
+class TestBookkeeping:
+    def _blob(self):
+        return {
+            "index_config": {
+                "model_name": "vidore/colqwen-test",
+                "highest_doc_id": 4,
+                "description": "demo",
+            },
+            "embed_id_to_extra": {0: {"orig_size": (10, 20)}},
+            "doc_ids_to_file_names": {1: "a.pdf"},
+            "doc_id_to_metadata": {1: {"title": "A"}},
+        }
+
+    def test_get_missing_returns_404(self, client):
+        r = client.get("/v1/collection/bk_missing/bookkeeping")
+        assert r.status_code == 404
+
+    def test_put_then_get_roundtrip(self, client):
+        blob = self._blob()
+        r = client.put(
+            "/v1/collection/bk_rt/bookkeeping",
+            content=_dumps(blob),
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        assert r.status_code == 200
+        assert r.json()["stored"] is True
+
+        r2 = client.get("/v1/collection/bk_rt/bookkeeping")
+        assert r2.status_code == 200
+        loaded = _loads(r2.content)
+        assert loaded["index_config"]["model_name"] == "vidore/colqwen-test"
+        assert loaded["doc_ids_to_file_names"][1] == "a.pdf"
+        assert loaded["doc_id_to_metadata"][1]["title"] == "A"
+
+    def test_put_overwrites(self, client):
+        client.put(
+            "/v1/collection/bk_ow/bookkeeping",
+            content=_dumps(self._blob()),
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        updated = self._blob()
+        updated["index_config"]["description"] = "v2"
+        client.put(
+            "/v1/collection/bk_ow/bookkeeping",
+            content=_dumps(updated),
+            headers={"Content-Type": "application/octet-stream"},
+        )
+        r = client.get("/v1/collection/bk_ow/bookkeeping")
+        assert _loads(r.content)["index_config"]["description"] == "v2"

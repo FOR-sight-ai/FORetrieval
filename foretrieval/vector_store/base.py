@@ -238,3 +238,36 @@ class VectorStore(abc.ABC):
 
         Default implementation is a no-op.  Matches export_sidecar().
         """
+
+    # ------------------------------------------------------------------
+    # Index-level bookkeeping (model name, doc metadata, file-name map,
+    # per-embedding extras, …).  For local/embedded backends this lives in
+    # local sidecar files written by ColPaliModel.  For the remote backend it
+    # is round-tripped to the server so the client needs no local index dir.
+    # ------------------------------------------------------------------
+
+    def supports_remote_bookkeeping(self) -> bool:
+        """Whether this backend persists ColPali bookkeeping on the server.
+
+        Local/embedded backends return False (ColPaliModel keeps writing the
+        local sidecar files).  RemoteVectorStore returns True so ColPaliModel
+        routes the bookkeeping blob through export/load_bookkeeping instead of
+        touching the local filesystem.
+        """
+        return False
+
+    def export_bookkeeping(self, blob: Dict[str, Any]) -> None:
+        """Persist the ColPali bookkeeping ``blob`` on the server.
+
+        ``blob`` is a plain dict whose values are JSON-serialisable or
+        torch.Tensors (it is transported with torch.save).  Default no-op;
+        only RemoteVectorStore implements this.
+        """
+
+    def load_bookkeeping(self) -> Optional[Dict[str, Any]]:
+        """Load the ColPali bookkeeping blob from the server.
+
+        Returns ``None`` when no bookkeeping is stored (or for backends that
+        do not support remote bookkeeping).  Default no-op.
+        """
+        return None

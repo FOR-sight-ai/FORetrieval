@@ -176,3 +176,33 @@ class TestPersistenceNoOps:
         store, _ = _make_store()
         store.open("idx", Path("."), create=True)
         store.load_sidecar(tmp_path)  # no error
+
+
+# ---------------------------------------------------------------------------
+# Bookkeeping (server-side, replaces local sidecars in remote mode)
+# ---------------------------------------------------------------------------
+
+class TestBookkeeping:
+    def test_supports_remote_bookkeeping(self):
+        store, _ = _make_store()
+        assert store.supports_remote_bookkeeping() is True
+
+    def test_export_bookkeeping_delegates(self):
+        store, client = _make_store()
+        store.open("idx", Path("."), create=True)
+        blob = {"index_config": {"model_name": "m"}}
+        store.export_bookkeeping(blob)
+        client.put_bookkeeping.assert_called_once_with("idx", blob)
+
+    def test_load_bookkeeping_delegates(self):
+        store, client = _make_store()
+        store.open("idx", Path("."), create=True)
+        client.get_bookkeeping.return_value = {"index_config": {"model_name": "m"}}
+        out = store.load_bookkeeping()
+        client.get_bookkeeping.assert_called_once_with("idx")
+        assert out["index_config"]["model_name"] == "m"
+
+    def test_export_bookkeeping_before_open_raises(self):
+        store, _ = _make_store()
+        with pytest.raises(RuntimeError):
+            store.export_bookkeeping({})

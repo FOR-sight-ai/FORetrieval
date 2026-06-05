@@ -299,9 +299,91 @@ class ColPaliModel:
         )
         self.model = None
 
+    # ------------------------------------------------------------------
+    # Bookkeeping persistence
+    #
+    # The index-level bookkeeping (model name, doc metadata, file-name map,
+    # per-embedding extras and a few scalar flags) is normally written to
+    # local sidecar files under ``index_root/index_name``.  When the active
+    # vector store stores this on the server (``supports_remote_bookkeeping``),
+    # we route the blob through the store instead so the client needs no local
+    # index directory at all — this is the remote ``vector_db_server`` mode.
+    # ------------------------------------------------------------------
+
+    def _uses_remote_bookkeeping(self) -> bool:
+        if self.storage_backend != "remote":
+            return False
+        supports = getattr(self.vector_store, "supports_remote_bookkeeping", None)
+        try:
+            return bool(supports()) if callable(supports) else False
+        except Exception:
+            return False
+
+    def _build_bookkeeping_blob(self, description: str = "") -> Dict[str, Any]:
+        """Assemble the in-memory bookkeeping into a single serialisable blob."""
+        index_config = {
+            "model_name": self.model_name,
+            "full_document_collection": self.full_document_collection,
+            "highest_doc_id": self.highest_doc_id,
+            "resize_stored_images": (
+                True if self.max_image_width and self.max_image_height else False
+            ),
+            "max_image_width": self.max_image_width,
+            "max_image_height": self.max_image_height,
+            "library_version": VERSION,
+            "storage_backend": self.storage_backend,
+            # storage_config is intentionally omitted: in remote mode the
+            # connection config comes from the caller (vector_db_server config),
+            # never from persisted bookkeeping.
+            "storage_config": None,
+            "description": description,
+        }
+        return {
+            "index_config": index_config,
+            "embed_id_to_extra": self.embed_id_to_extra,
+            "doc_ids_to_file_names": self.doc_ids_to_file_names,
+            "doc_id_to_metadata": self.doc_id_to_metadata,
+        }
+
+    def _apply_bookkeeping_blob(self, blob: Dict[str, Any]) -> None:
+        """Populate in-memory bookkeeping from a server-loaded blob."""
+        index_config = blob.get("index_config", {}) or {}
+        self.full_document_collection = index_config.get(
+            "full_document_collection", False
+        )
+        self.resize_stored_images = index_config.get("resize_stored_images", False)
+        self.max_image_width = index_config.get("max_image_width", None)
+        self.max_image_height = index_config.get("max_image_height", None)
+        self.index_description = index_config.get("description", "")
+
+        self.embed_id_to_extra = {
+            int(k): v for k, v in (blob.get("embed_id_to_extra") or {}).items()
+        }
+        self.doc_ids_to_file_names = {
+            int(k): v for k, v in (blob.get("doc_ids_to_file_names") or {}).items()
+        }
+        self.doc_id_to_metadata = {
+            int(k): v for k, v in (blob.get("doc_id_to_metadata") or {}).items()
+        }
+        self.highest_doc_id = max(self.doc_id_to_metadata.keys(), default=-1)
+        self.doc_ids = set(self.doc_id_to_metadata.keys())
+
     def _load_index_state(self):
         if self.index_name is None:
             raise ValueError("No index name specified. Cannot load from index.")
+
+        # Remote bookkeeping mode: pull everything from the server, no local
+        # index directory is read.
+        if self.storage_backend == "remote" and self._uses_remote_bookkeeping():
+            blob = self.vector_store.load_bookkeeping()
+            if blob is None:
+                raise FileNotFoundError(
+                    f"No bookkeeping found on the server for collection "
+                    f"'{self.index_name}'. The collection may not have been "
+                    "indexed yet."
+                )
+            self._apply_bookkeeping_blob(blob)
+            return
 
         index_path = Path(self.index_root) / self.index_name
         index_config_path = index_path / "index_config.json.gz"
@@ -397,6 +479,39 @@ class ColPaliModel:
             **kwargs,
         )
 
+    @staticmethod
+    def _fetch_remote_model_name(
+        index_name: str, storage_config: Dict[str, Any]
+    ) -> str:
+        """Fetch the indexed model name from the remote server bookkeeping.
+
+        Used by from_index() in remote mode to bootstrap the instance before
+        any local state exists.  Raises if the server has no bookkeeping for
+        the collection.
+        """
+        from .vector_store.factory import make_vector_store
+
+        vs = make_vector_store("remote", storage_config)
+        vs.open(index_name, Path("."), create=False)
+        try:
+            blob = vs.load_bookkeeping()
+        finally:
+            try:
+                vs.close()
+            except Exception:
+                pass
+        if not blob:
+            raise FileNotFoundError(
+                f"No bookkeeping found on the server for collection "
+                f"'{index_name}'. Has it been indexed?"
+            )
+        model_name = (blob.get("index_config", {}) or {}).get("model_name")
+        if not model_name:
+            raise ValueError(
+                f"Server bookkeeping for '{index_name}' has no model_name."
+            )
+        return model_name
+
     @classmethod
     def from_index(
         cls,
@@ -406,12 +521,37 @@ class ColPaliModel:
         device: Optional[Union[str, torch.device]] = None,
         index_root: str = ".foretrieval",
         embedding_server: Optional[EmbeddingServerConfig] = None,
+        storage_backend: Optional[str] = None,
         storage_config: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
+        # Remote bookkeeping mode: the connection config is supplied by the
+        # caller (from the vector_db_server config), and the model name plus
+        # all index state live on the server — no local index directory is
+        # read.  Triggered by storage_backend="remote".
+        if (storage_backend or "").strip().lower() == "remote":
+            index_name = Path(index_path).name
+            model_name = cls._fetch_remote_model_name(index_name, storage_config or {})
+            instance = cls(
+                pretrained_model_name_or_path=model_name,
+                n_gpu=n_gpu,
+                index_name=index_name,
+                verbose=verbose,
+                load_from_index=True,
+                index_root=index_root,
+                device=device,
+                storage_backend="remote",
+                storage_config=storage_config,
+                embedding_server=embedding_server,
+                **kwargs,
+            )
+            return instance
+
         index_path = Path(os.path.join(Path(index_root), Path(index_path)))
         index_config: dict = srsly.read_gzip_json(index_path / "index_config.json.gz")
-        storage_backend = index_config.get("storage_backend", "local")
+        disk_backend = index_config.get("storage_backend", "local")
+        # Caller-supplied backend wins if given, else use on-disk value.
+        storage_backend = (storage_backend or disk_backend)
 
         # For the remote backend, merge on-disk storage_config (URL, backend, …)
         # with caller-supplied storage_config (api_key, etc.).  Caller wins on
@@ -442,6 +582,24 @@ class ColPaliModel:
     def _export_index(self, description: str = ""):
         if self.index_name is None:
             raise ValueError("No index name specified. Cannot export.")
+
+        # Remote bookkeeping mode: push everything to the server, no local
+        # index directory is written.
+        if self.storage_backend == "remote" and self._uses_remote_bookkeeping():
+            if not description:
+                existing = self.vector_store.load_bookkeeping()
+                if existing:
+                    description = (existing.get("index_config", {}) or {}).get(
+                        "description", ""
+                    )
+            blob = self._build_bookkeeping_blob(description=description)
+            self.vector_store.export_bookkeeping(blob)
+            if self.verbose > 0:
+                print(
+                    f"Index bookkeeping stored on server for "
+                    f"collection '{self.index_name}'"
+                )
+            return
 
         index_path = Path(self.index_root) / self.index_name
         index_path.mkdir(parents=True, exist_ok=True)
@@ -517,6 +675,7 @@ class ColPaliModel:
         batch_size: int = 1,
         description: str = "",
         ai_cfg: Optional[Dict[str, Any]] = None,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Union[Dict[int, str], None]:
         if (
             self.index_name is not None
@@ -533,7 +692,13 @@ class ColPaliModel:
             raise ValueError("index_name must be specified to create a new index.")
 
         index_path = Path(os.path.join(Path(self.index_root), Path(index_name)))
-        if index_path.exists():
+        # In remote bookkeeping mode the local index directory is irrelevant
+        # (vectors and bookkeeping live on the server), so skip the local-dir
+        # existence guard entirely.
+        if (
+            not (self.storage_backend == "remote" and self._uses_remote_bookkeeping())
+            and index_path.exists()
+        ):
             if not overwrite and (
                 (index_path.is_dir() and len(list(index_path.iterdir())) > 0)
                 or index_path.is_file()
@@ -581,8 +746,14 @@ class ColPaliModel:
                 raise ValueError(
                     f"Number of metadata entries ({len(metadata)}) does not match number of documents ({len(items)})"
                 )
+            n_files = len(items)
+            if on_progress is not None:
+                try:
+                    on_progress({"stage": "start", "n_files": n_files})
+                except Exception:  # noqa: BLE001
+                    pass
             for i, item in tqdm(
-                enumerate(items), total=len(items), desc="Indexing files"
+                enumerate(items), total=n_files, desc="Indexing files"
             ):
                 doc_id = doc_ids[i] if doc_ids else self.highest_doc_id + 1
                 if metadata is None:
@@ -594,6 +765,17 @@ class ColPaliModel:
                 else:
                     doc_md = metadata[doc_id] if metadata else None
 
+                if on_progress is not None:
+                    try:
+                        on_progress({
+                            "stage": "file_start",
+                            "file": item.name,
+                            "file_idx": i,
+                            "n_files": n_files,
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
+
                 try:
                     self.add_to_index(
                         item,
@@ -601,10 +783,24 @@ class ColPaliModel:
                         doc_id=doc_id,
                         metadata=doc_md,
                         batch_size=batch_size,
+                        on_progress=on_progress,
+                        _file_idx=i,
+                        _n_files=n_files,
                     )
                 except Exception as e:
                     logger.warning(f"Skipping faulty PDF {item}:\n{str(e)}")
                     continue
+
+                if on_progress is not None:
+                    try:
+                        on_progress({
+                            "stage": "file_done",
+                            "file": item.name,
+                            "file_idx": i,
+                            "n_files": n_files,
+                        })
+                    except Exception:  # noqa: BLE001
+                        pass
 
         else:
             if metadata is not None and len(metadata) != 1:
@@ -613,12 +809,42 @@ class ColPaliModel:
                 )
             doc_id = doc_ids[0] if doc_ids else self.highest_doc_id + 1
             doc_metadata = metadata[0] if metadata else None
+            if on_progress is not None:
+                try:
+                    on_progress({"stage": "start", "n_files": 1})
+                    on_progress({
+                        "stage": "file_start",
+                        "file": input_path.name,
+                        "file_idx": 0,
+                        "n_files": 1,
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
             self.add_to_index(
                 input_path,
                 store_collection_with_index,
                 doc_id=doc_id,
                 metadata=doc_metadata,
+                on_progress=on_progress,
+                _file_idx=0,
+                _n_files=1,
             )
+            if on_progress is not None:
+                try:
+                    on_progress({
+                        "stage": "file_done",
+                        "file": input_path.name,
+                        "file_idx": 0,
+                        "n_files": 1,
+                    })
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if on_progress is not None:
+            try:
+                on_progress({"stage": "all_done"})
+            except Exception:  # noqa: BLE001
+                pass
 
         # Auto-generate index description from per-doc AI metadata when available
         if not description and ai_cfg and self.doc_id_to_metadata:
@@ -638,6 +864,9 @@ class ColPaliModel:
         doc_id: Optional[Union[int, List[int]]] = None,
         metadata: Optional[Union[List[DocMetadata], DocMetadata]] = None,
         batch_size: int = 1,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        _file_idx: int = 0,
+        _n_files: int = 1,
     ) -> Dict[int, str]:
         if self.index_name is None:
             raise ValueError(
@@ -698,6 +927,9 @@ class ColPaliModel:
                         current_doc_id,
                         current_metadata,
                         batch_size,
+                        on_progress=on_progress,
+                        _file_idx=_file_idx,
+                        _n_files=_n_files,
                     )
                 else:
                     stored_path = self._process_and_add_to_index(
@@ -706,6 +938,9 @@ class ColPaliModel:
                         current_doc_id,
                         current_metadata,
                         batch_size,
+                        on_progress=on_progress,
+                        _file_idx=_file_idx,
+                        _n_files=_n_files,
                     )
                     if stored_path is None:
                         self.doc_ids_to_file_names[current_doc_id] = "In-memory Image"
@@ -714,7 +949,10 @@ class ColPaliModel:
 
             elif isinstance(item, Image.Image):
                 self._process_and_add_to_index(
-                    item, store_collection_with_index, current_doc_id, current_metadata
+                    item, store_collection_with_index, current_doc_id, current_metadata,
+                    on_progress=on_progress,
+                    _file_idx=_file_idx,
+                    _n_files=_n_files,
                 )
                 self.doc_ids_to_file_names[current_doc_id] = "In-memory Image"
             else:
@@ -730,12 +968,18 @@ class ColPaliModel:
         base_doc_id: int,
         metadata: Optional[Dict[str, Union[str, int]]],
         batch_size: int,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        _file_idx: int = 0,
+        _n_files: int = 1,
     ):
         for i, item in enumerate(directory.iterdir()):
             print(f"Indexing file: {item}")
             current_doc_id = base_doc_id + i
             stored_path = self._process_and_add_to_index(
-                item, store_collection_with_index, current_doc_id, metadata, batch_size
+                item, store_collection_with_index, current_doc_id, metadata, batch_size,
+                on_progress=on_progress,
+                _file_idx=_file_idx,
+                _n_files=_n_files,
             )
             if stored_path is None:
                 self.doc_ids_to_file_names[current_doc_id] = "In-memory Image"
@@ -749,11 +993,29 @@ class ColPaliModel:
         doc_id: Union[str, int],
         metadata: Optional[Dict[str, Union[str, int]]] = None,
         batch_size: int = 1,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+        _file_idx: int = 0,
+        _n_files: int = 1,
     ) -> Optional[Path]:
         """
         Process and index an image or any file (converted to PDF if needed).
         Returns the 'canonical' path (PDF or image) used, or None for in-memory images.
         """
+        def _emit_page(file_name: str, page_idx: int, n_pages: int) -> None:
+            if on_progress is None:
+                return
+            try:
+                on_progress({
+                    "stage": "page",
+                    "file": file_name,
+                    "file_idx": _file_idx,
+                    "n_files": _n_files,
+                    "page_idx": page_idx,
+                    "n_pages": n_pages,
+                })
+            except Exception:  # noqa: BLE001
+                pass
+
         if isinstance(item, Path):
             ext = item.suffix.lower()
 
@@ -778,14 +1040,16 @@ class ColPaliModel:
                     self.docling_dir.mkdir(parents=True, exist_ok=True)
                 chunks = chunk_pdf_to_images(pdf_file, output_dir=self.docling_dir)
 
-                for i in range(0, len(chunks), batch_size):
+                n_chunks = len(chunks)
+                for i in range(0, n_chunks, batch_size):
                     batch_chunks, batch_page_ids, batch_chunk_ids = [], [], []
-                    for j in range(i, min(i + batch_size, len(chunks))):
+                    for j in range(i, min(i + batch_size, n_chunks)):
                         ch = chunks[j]
                         image = Image.open(ch.path)
                         batch_chunks.append(image)
                         batch_page_ids.append(ch.page_id)
                         batch_chunk_ids.append(ch.elem_id)
+                        _emit_page(item.name, j, n_chunks)
                     self._add_to_index(
                         batch_chunks,
                         store_collection_with_index,
@@ -799,6 +1063,7 @@ class ColPaliModel:
 
             elif ext in [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif"]:
                 image = Image.open(item)
+                _emit_page(item.name, 0, 1)
                 self._add_to_index(image, store_collection_with_index, doc_id, metadata=metadata)
                 return item.resolve()
 
@@ -812,13 +1077,15 @@ class ColPaliModel:
                         output_folder=path,
                         paths_only=True,
                     )
-                    for i in range(0, len(images), batch_size):
+                    n_pages = len(images)
+                    for i in range(0, n_pages, batch_size):
                         batch_images, batch_page_ids = [], []
-                        for j in range(i, min(i + batch_size, len(images))):
+                        for j in range(i, min(i + batch_size, n_pages)):
                             image_path = images[j]
                             image = Image.open(image_path)
                             batch_images.append(image)
                             batch_page_ids.append(j + 1)
+                            _emit_page(item.name, j, n_pages)
                         self._add_to_index(
                             batch_images,
                             store_collection_with_index,
@@ -843,13 +1110,15 @@ class ColPaliModel:
                         output_folder=path,
                         paths_only=True,
                     )
-                    for i in range(0, len(images), batch_size):
+                    n_pages = len(images)
+                    for i in range(0, n_pages, batch_size):
                         batch_images, batch_page_ids = [], []
-                        for j in range(i, min(i + batch_size, len(images))):
+                        for j in range(i, min(i + batch_size, n_pages)):
                             image_path = images[j]
                             image = Image.open(image_path)
                             batch_images.append(image)
                             batch_page_ids.append(j + 1)
+                            _emit_page(item.name, j, n_pages)
                         self._add_to_index(
                             batch_images,
                             store_collection_with_index,
@@ -860,6 +1129,7 @@ class ColPaliModel:
                 return Path(pdf_file).resolve()
 
         elif isinstance(item, Image.Image):
+            _emit_page("<in-memory>", 0, 1)
             self._add_to_index(item, store_collection_with_index, doc_id, metadata=metadata)
             return None
         else:

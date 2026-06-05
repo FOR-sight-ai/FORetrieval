@@ -35,6 +35,9 @@ _POINT_EXISTS = "/v1/point/{name}/{point_id}/exists"
 _UPSERT = "/v1/upsert/{name}"
 _SEARCH = "/v1/search/{name}"
 _VECTOR = "/v1/vector/{name}/{point_id}"
+_BOOKKEEPING = "/v1/collection/{name}/bookkeeping"
+_ADMIN_INDEXES = "/v1/admin/indexes"
+_ADMIN_DATA_FOLDERS = "/v1/admin/data_folders"
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +272,50 @@ class VectorDBServerClient:
         return _loads(resp.content)
 
     # ------------------------------------------------------------------
+    # Bookkeeping (ColPali index-level metadata stored on the server)
+    # ------------------------------------------------------------------
+
+    def put_bookkeeping(self, index_name: str, blob: Dict[str, Any]) -> None:
+        """Store the ColPali bookkeeping ``blob`` for ``index_name``.
+
+        ``blob`` may contain tensors; it is transported via torch.save.
+        """
+        url = self.config.url + _BOOKKEEPING.format(name=index_name)
+        data = _dumps(blob)
+        try:
+            resp = self._client.put(
+                url,
+                content=data,
+                headers={"Content-Type": "application/octet-stream"},
+            )
+        except httpx.TimeoutException as exc:
+            raise TimeoutError(
+                f"Vector-DB server timed out after {self.config.request_timeout}s"
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise ConnectionError(
+                f"Cannot reach vector-DB server at {self.config.url}"
+            ) from exc
+        _raise_for_status(resp)
+
+    def get_bookkeeping(self, index_name: str) -> Optional[Dict[str, Any]]:
+        """Fetch the ColPali bookkeeping blob for ``index_name``.
+
+        Returns None when the server has no bookkeeping stored (404).
+        """
+        url = self.config.url + _BOOKKEEPING.format(name=index_name)
+        try:
+            resp = self._client.get(url)
+        except httpx.HTTPError as exc:
+            raise ConnectionError(
+                f"Cannot reach vector-DB server at {self.config.url}"
+            ) from exc
+        if resp.status_code == 404:
+            return None
+        _raise_for_status(resp)
+        return _loads(resp.content)
+
+    # ------------------------------------------------------------------
     # Admin
     # ------------------------------------------------------------------
 
@@ -282,6 +329,38 @@ class VectorDBServerClient:
                 f"Cannot reach vector-DB server at {self.config.url}"
             ) from exc
         _raise_for_status(resp)
+
+    def list_indexes(self) -> dict:
+        """Return the server's list of index directories under ``data_dir``.
+
+        The returned payload has the shape
+        ``{"items": [{"name": str, "path": str, "size_bytes": int,
+        "n_files": int, "modified": float, "has_collection": bool,
+        "backend": Optional[str]}, ...], "data_dir": str, "count": int}``.
+        """
+        try:
+            resp = self._client.get(self.config.url + _ADMIN_INDEXES)
+        except httpx.HTTPError as exc:
+            raise ConnectionError(
+                f"Cannot reach vector-DB server at {self.config.url}"
+            ) from exc
+        _raise_for_status(resp)
+        return resp.json()
+
+    def list_data_folders(self) -> dict:
+        """Return every direct subdirectory under ``data_dir`` on the server.
+
+        Each item carries ``is_index`` so the caller can filter client-side.
+        Same envelope as :py:meth:`list_indexes`.
+        """
+        try:
+            resp = self._client.get(self.config.url + _ADMIN_DATA_FOLDERS)
+        except httpx.HTTPError as exc:
+            raise ConnectionError(
+                f"Cannot reach vector-DB server at {self.config.url}"
+            ) from exc
+        _raise_for_status(resp)
+        return resp.json()
 
     # ------------------------------------------------------------------
     # Lifecycle

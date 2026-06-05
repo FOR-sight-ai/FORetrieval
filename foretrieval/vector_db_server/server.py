@@ -28,8 +28,9 @@ import io
 import json
 import logging
 import os
+import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -129,6 +130,15 @@ def _write_meta(index_name: str, meta: Dict[str, Any]) -> None:
     p = _meta_path(index_name)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(meta))
+
+
+def _bookkeeping_path(index_name: str) -> Path:
+    """Return the path to the ColPali bookkeeping blob for a collection.
+
+    Stored as a torch.save'd dict alongside ``index.json`` so the client no
+    longer needs a local index directory in remote mode.
+    """
+    return _DATA_DIR / index_name / "bookkeeping.pt"
 
 
 def _inject_scorer(vs: Any) -> None:
@@ -263,6 +273,7 @@ async def open_collection(request: Request):
 
         meta = {"backend": backend, "storage_config": storage_config}
         _write_meta(index_name, meta)
+        _invalidate_size_cache(_DATA_DIR / index_name)
 
         logger.info(
             "Created collection '%s' (backend=%s, dim=%s).",
@@ -306,6 +317,7 @@ async def create_collection(request: Request):
         _registry[index_name] = vs
 
         _write_meta(index_name, {"backend": backend, "storage_config": storage_config})
+        _invalidate_size_cache(_DATA_DIR / index_name)
         logger.info("Created collection '%s' backend=%s dim=%d.", index_name, backend, dim)
         return JSONResponse({"created": True})
 
@@ -327,9 +339,53 @@ async def delete_collection(name: str):
         if coll_dir.exists():
             shutil.rmtree(coll_dir)
             logger.info("Deleted collection directory '%s'.", coll_dir)
+        _invalidate_size_cache(coll_dir)
 
         _locks.pop(name, None)
         return {"deleted": True}
+
+
+# ------------------------------------------------------------------
+# Bookkeeping (ColPali index-level metadata, stored server-side)
+# ------------------------------------------------------------------
+
+@app.put("/v1/collection/{name}/bookkeeping")
+async def put_bookkeeping(name: str, request: Request):
+    """Persist the ColPali bookkeeping blob (torch.save bytes body).
+
+    The blob is a dict of index-level metadata (model name, doc metadata,
+    file-name map, per-embedding extras, …) that previously lived in local
+    sidecar files on the client.  Stored under ``<data_dir>/<name>/``.
+    """
+    data = await request.body()
+    blob = _loads(data)
+
+    async with _get_lock(name):
+        path = _bookkeeping_path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(blob, path)
+        _invalidate_size_cache(_DATA_DIR / name)
+
+    return {"stored": True}
+
+
+@app.get("/v1/collection/{name}/bookkeeping")
+async def get_bookkeeping(name: str):
+    """Return the ColPali bookkeeping blob for a collection.
+
+    Returns 404 if no bookkeeping has been stored.  Response body is the
+    torch.save'd blob.
+    """
+    async with _get_lock(name):
+        path = _bookkeeping_path(name)
+        if not path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"No bookkeeping stored for collection '{name}'.",
+            )
+        blob = torch.load(path, map_location="cpu", weights_only=False)
+
+    return Response(content=_dumps(blob), media_type="application/octet-stream")
 
 
 # ------------------------------------------------------------------
@@ -372,6 +428,7 @@ async def upsert(name: str, request: Request):
 
         vs.upsert(points)
         vs.export_sidecar(_DATA_DIR / name)
+        _invalidate_size_cache(_DATA_DIR / name)
 
     return {"upserted": len(points)}
 
@@ -436,3 +493,181 @@ async def fetch_vector(name: str, point_id: int):
             detail=f"Point {point_id} not found in collection '{name}'.",
         )
     return Response(content=_dumps(tensor), media_type="application/octet-stream")
+
+
+# ------------------------------------------------------------------
+# Admin endpoints (read-only)
+#
+# These walk the on-disk data_dir to surface index and folder information
+# (size, file count, mtime). Auth is inherited from the same middleware as
+# the data-plane routes.
+# ------------------------------------------------------------------
+
+_SIZE_CACHE: Dict[str, Tuple[float, int, int, float]] = {}
+# Cache key = absolute path (str)
+# Cache value = (cached_at_epoch, size_bytes, n_files, mtime)
+
+_CACHE_TTL = 60.0  # seconds
+
+_CACHE_LOCK = asyncio.Lock()
+
+
+def _is_index_dir(path: Path) -> bool:
+    """Return True when ``path`` looks like a FORetrieval index directory.
+
+    Uses the server-side collection metadata file written by ``_write_meta``
+    (``<name>/index.json``) as the sentinel.  The client-side sidecar files
+    (``index_config.json.gz``, ``metadata.json.gz``) live on the Streamlit
+    host, not on the server, so they are never present here.
+    """
+    return (path / "index.json").exists()
+
+
+def _dir_stats_sync(path: Path) -> Tuple[int, int, float]:
+    """Synchronously walk ``path`` returning (size_bytes, n_files, mtime).
+
+    Symlinks are not followed. Entries that resolve outside ``_DATA_DIR``
+    are skipped silently to prevent jail escapes.
+    """
+    root_resolved = _DATA_DIR.resolve()
+    total_size = 0
+    n_files = 0
+    max_mtime = 0.0
+    try:
+        max_mtime = path.stat().st_mtime
+    except OSError:
+        return (0, 0, 0.0)
+
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+        dp = Path(dirpath)
+        # Containment check
+        try:
+            resolved = dp.resolve()
+        except OSError:
+            continue
+        try:
+            resolved.relative_to(root_resolved)
+        except ValueError:
+            # Outside the jail — skip
+            dirnames[:] = []
+            continue
+
+        for fname in filenames:
+            fp = dp / fname
+            try:
+                st = fp.lstat()
+            except OSError:
+                continue
+            total_size += st.st_size
+            n_files += 1
+            if st.st_mtime > max_mtime:
+                max_mtime = st.st_mtime
+
+    return (total_size, n_files, max_mtime)
+
+
+async def _dir_stats(path: Path) -> Tuple[int, int, float]:
+    """Cached, async wrapper around ``_dir_stats_sync`` with a 60s TTL."""
+    key = str(path)
+    now = time.time()
+    async with _CACHE_LOCK:
+        cached = _SIZE_CACHE.get(key)
+        if cached is not None:
+            cached_at, size_b, n_f, mtime = cached
+            if now - cached_at < _CACHE_TTL:
+                return (size_b, n_f, mtime)
+
+    # Compute in a worker thread so a slow FS doesn't block the loop
+    size_b, n_f, mtime = await asyncio.to_thread(_dir_stats_sync, path)
+    async with _CACHE_LOCK:
+        _SIZE_CACHE[key] = (time.time(), size_b, n_f, mtime)
+    return (size_b, n_f, mtime)
+
+
+def _invalidate_size_cache(path: Path) -> None:
+    """Drop the cached stats for ``path`` so the next call recomputes."""
+    _SIZE_CACHE.pop(str(path), None)
+
+
+@app.get("/v1/admin/indexes")
+async def admin_list_indexes():
+    """List FORetrieval index directories visible under ``data_dir``.
+
+    A subdirectory is considered an index when it contains either
+    ``index_config.json.gz`` or ``metadata.json.gz``.
+
+    Returns:
+        ``{"items": [...], "data_dir": str, "count": int}``
+        where each item has keys
+        ``name, path, size_bytes, n_files, modified, has_collection, backend``.
+    """
+    items: List[Dict[str, Any]] = []
+    root_resolved = _DATA_DIR.resolve()
+
+    if not _DATA_DIR.exists():
+        return {"items": [], "data_dir": str(_DATA_DIR), "count": 0}
+
+    for entry in sorted(_DATA_DIR.iterdir(), key=lambda p: p.name):
+        if not entry.is_dir():
+            continue
+        try:
+            resolved = entry.resolve()
+            resolved.relative_to(root_resolved)
+        except (OSError, ValueError):
+            continue
+        if not _is_index_dir(entry):
+            continue
+
+        size_b, n_f, mtime = await _dir_stats(entry)
+        meta = _read_meta(entry.name)
+        items.append({
+            "name": entry.name,
+            "path": str(entry),
+            "size_bytes": size_b,
+            "n_files": n_f,
+            "modified": mtime,
+            "has_collection": entry.name in _registry or meta is not None,
+            "backend": (meta or {}).get("backend"),
+        })
+
+    return {"items": items, "data_dir": str(_DATA_DIR), "count": len(items)}
+
+
+@app.get("/v1/admin/data_folders")
+async def admin_list_data_folders():
+    """List every subdirectory under ``data_dir``.
+
+    Each item is annotated with ``is_index=True`` when the directory looks
+    like a FORetrieval index (so the UI can filter client-side).
+
+    Returns:
+        ``{"items": [...], "data_dir": str, "count": int}``
+        where each item has keys
+        ``name, path, size_bytes, n_files, modified, is_index``.
+    """
+    items: List[Dict[str, Any]] = []
+    root_resolved = _DATA_DIR.resolve()
+
+    if not _DATA_DIR.exists():
+        return {"items": [], "data_dir": str(_DATA_DIR), "count": 0}
+
+    for entry in sorted(_DATA_DIR.iterdir(), key=lambda p: p.name):
+        if not entry.is_dir():
+            continue
+        try:
+            resolved = entry.resolve()
+            resolved.relative_to(root_resolved)
+        except (OSError, ValueError):
+            continue
+
+        size_b, n_f, mtime = await _dir_stats(entry)
+        items.append({
+            "name": entry.name,
+            "path": str(entry),
+            "size_bytes": size_b,
+            "n_files": n_f,
+            "modified": mtime,
+            "is_index": _is_index_dir(entry),
+        })
+
+    return {"items": items, "data_dir": str(_DATA_DIR), "count": len(items)}

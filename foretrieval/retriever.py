@@ -109,6 +109,7 @@ class MultiModalRetrieverModel:
         device: str = "cuda",
         verbose: int = 1,
         embedding_server: Optional[EmbeddingServerConfig] = None,
+        storage_backend: Optional[str] = None,
         storage_config: Optional[Dict[str, Any]] = None,
     ):
         """Load an index and the associated model from disk.
@@ -119,6 +120,10 @@ class MultiModalRetrieverModel:
             device (str): The device to load the model on. Default is "cuda".
             embedding_server (Optional[EmbeddingServerConfig]): If set, embeddings are computed
                 on the remote vLLM server instead of locally.
+            storage_backend (Optional[str]): Force a storage backend. When set to
+                "remote", the index state (model name, bookkeeping) is loaded from
+                the vector_db_server instead of a local index directory.  When None
+                the backend is read from the saved index_config.json.gz.
             storage_config (Optional[Dict]): Backend-specific overrides (e.g. Milvus candidate_limit).
                 The storage_backend is read from the saved index_config.json.gz automatically.
 
@@ -133,6 +138,7 @@ class MultiModalRetrieverModel:
             device=device,
             verbose=verbose,
             embedding_server=embedding_server,
+            storage_backend=storage_backend,
             storage_config=storage_config,
         )
         return instance
@@ -154,6 +160,7 @@ class MultiModalRetrieverModel:
         max_image_height: Optional[int] = None,
         description: str = "",
         ai_cfg: Optional[Dict[str, Any]] = None,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
         **kwargs,
     ):
         """Build an index from input documents.
@@ -171,6 +178,11 @@ class MultiModalRetrieverModel:
             ai_cfg (Optional[Dict]): Provider config for the summary LLM (same format as
                 ``ai_metadata_provider_factory``).  Only used for auto-generation when
                 ``description`` is empty.
+            on_progress (Optional[Callable]): Callback invoked with progress events.
+                Each event is a dict with at least a ``stage`` key. Possible stages:
+                ``"start"`` (with ``n_files``), ``"file_start"``, ``"page"``,
+                ``"file_done"``, ``"all_done"``. The callback is best-effort:
+                exceptions raised by the callback are swallowed.
 
         Returns:
             None
@@ -186,6 +198,7 @@ class MultiModalRetrieverModel:
             max_image_height=max_image_height,
             description=description,
             ai_cfg=ai_cfg,
+            on_progress=on_progress,
             **kwargs,
         )
 
