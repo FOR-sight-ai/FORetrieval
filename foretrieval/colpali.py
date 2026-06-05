@@ -692,7 +692,13 @@ class ColPaliModel:
             raise ValueError("index_name must be specified to create a new index.")
 
         index_path = Path(os.path.join(Path(self.index_root), Path(index_name)))
-        if index_path.exists():
+        # In remote bookkeeping mode the local index directory is irrelevant
+        # (vectors and bookkeeping live on the server), so skip the local-dir
+        # existence guard entirely.
+        if (
+            not (self.storage_backend == "remote" and self._uses_remote_bookkeeping())
+            and index_path.exists()
+        ):
             if not overwrite and (
                 (index_path.is_dir() and len(list(index_path.iterdir())) > 0)
                 or index_path.is_file()
