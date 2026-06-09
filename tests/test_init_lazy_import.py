@@ -18,6 +18,27 @@ from __future__ import annotations
 import importlib
 import sys
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot sys.modules before each test and restore it afterward.
+
+    Each test in this file deliberately purges all foretrieval.* entries from
+    sys.modules to verify lazy-import semantics. Without this fixture the purge
+    is permanent for the rest of the pytest session, causing later tests to
+    receive split module identities (OLD class object vs NEW class object) that
+    break isinstance() checks, patch() targets, and module-global reads.
+    """
+    snapshot = {k: v for k, v in sys.modules.items()}
+    yield
+    # Remove any modules that were added during the test (not in snapshot)
+    for k in [k for k in sys.modules if k not in snapshot]:
+        del sys.modules[k]
+    # Restore all snapshot entries, overwriting any re-imported variants
+    sys.modules.update(snapshot)
+
 
 def test_foretrieval_init_does_not_import_colpali():
     """Importing ``foretrieval`` must NOT pull in colpali as a side-effect.
