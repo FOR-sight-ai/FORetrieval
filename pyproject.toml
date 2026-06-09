@@ -7,7 +7,7 @@ include = ["foretrieval*"]
 
 [project]
 name = "FORetrieval"
-version = "2026.6.0"
+version = "2026.6.1"
 description = "Use late-interaction multi-modal models such as ColPali in just a few lines of code."
 readme = "README.md"
 requires-python = ">=3.12"
