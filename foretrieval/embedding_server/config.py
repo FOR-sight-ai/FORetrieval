@@ -1,6 +1,5 @@
 """Configuration model for the remote embedding server."""
 
-import os
 from typing import Optional
 
 from pydantic import BaseModel, field_validator, model_validator
