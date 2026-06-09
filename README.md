@@ -77,6 +77,9 @@ model.index(
     index_name="my_index",
     store_collection_with_index=True,
 )
+# Indexing is recursive: all files in subdirectories are also indexed.
+# Use update_index_from_folder() to add only new files to an existing index,
+# also recursing into subdirectories.
 
 # Load an existing index and search
 model = MultiModalRetrieverModel.from_index(

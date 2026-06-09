@@ -245,7 +245,7 @@ class VectorDBServerManager:
     def _build_docker_run_cmd(self) -> str:
         cfg = self.config
         env_parts = [
-            f"-e FOR_DB_DATA_DIR=/data",
+            "-e FOR_DB_DATA_DIR=/data",
             # FOR_DB_PORT sets the port the server listens on inside the container.
             # This must always match _CONTAINER_INTERNAL_PORT — not cfg.port, which
             # is the host-side binding.  cfg.port is used below in -p HOST:CONTAINER.
@@ -299,7 +299,6 @@ class VectorDBServerManager:
 
     def _upload_build_context(self) -> None:
         """Create a tar of foretrieval/ + Dockerfile.vector_db and upload to remote."""
-        import paramiko
 
         # Locate the local foretrieval package root (parent of vector_db_server/)
         package_root = Path(__file__).parent.parent.parent  # …/FORetrieval/

@@ -19,7 +19,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
-from typing import List, Optional
+from typing import List
 
 import httpx
 import torch

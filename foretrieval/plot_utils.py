@@ -1,9 +1,7 @@
-import os
 import base64
 import io
 import numpy as np
 from PIL import Image, ImageDraw
-import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import torch
 import torch.nn.functional as F

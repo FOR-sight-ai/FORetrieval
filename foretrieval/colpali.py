@@ -34,7 +34,6 @@ from .file_to_pdf import _convert_to_pdf
 from .models_metadata import DocMetadata, MetadataFilter
 from .objects import Result
 from .plot_utils import draw_circle_on_max_patch, pil_from_base64, pil_to_base64_png, compute_patch_heatmap, majority_token_id, build_heatmap_overlays_base64
-from .utils import _value_match
 from .vector_store import (
     LocalVectorStore,
     MultiVectorQuery,
@@ -43,8 +42,6 @@ from .vector_store import (
     make_point_id,
     make_vector_store,
 )
-from .vector_store.qdrant import _QDRANT_AVAILABLE
-from .vector_store.milvus import _MILVUS_AVAILABLE
 
 VERSION = "0.0.1"
 
@@ -737,7 +734,10 @@ class ColPaliModel:
             self.highest_doc_id = -1
 
         if input_path.is_dir():
-            items = sorted(input_path.iterdir(), key=lambda p: p.name)
+            items = sorted(
+                (p for p in input_path.rglob("*") if p.is_file()),
+                key=lambda p: p.relative_to(input_path),
+            )
             if doc_ids is not None and len(doc_ids) != len(items):
                 raise ValueError(
                     f"Number of doc_ids ({len(doc_ids)}) does not match number of documents ({len(items)})"
@@ -972,8 +972,12 @@ class ColPaliModel:
         _file_idx: int = 0,
         _n_files: int = 1,
     ):
-        for i, item in enumerate(directory.iterdir()):
-            print(f"Indexing file: {item}")
+        files = sorted(
+            (p for p in directory.rglob("*") if p.is_file()),
+            key=lambda p: p.relative_to(directory),
+        )
+        for i, item in tqdm(enumerate(files), total=len(files), desc=f"Indexing {directory.name}"):
+            logger.debug(f"Indexing file: {item}")
             current_doc_id = base_doc_id + i
             stored_path = self._process_and_add_to_index(
                 item, store_collection_with_index, current_doc_id, metadata, batch_size,
@@ -1274,9 +1278,10 @@ class ColPaliModel:
         added = 0
         updated = 0
 
-        for item in sorted(folder.iterdir()):
-            if item.is_dir():
-                continue
+        for item in sorted(
+            (p for p in folder.rglob("*") if p.is_file()),
+            key=lambda p: p.relative_to(folder),
+        ):
 
             ext = item.suffix.lower()
 
@@ -1564,7 +1569,7 @@ class ColPaliModel:
                     assert self.index_name is not None, "index_name must be set to use docling ingestion"
                     self.docling_dir = Path(self.index_root) / self.index_name / "docling_chunks"
                     self.docling_dir.mkdir(parents=True, exist_ok=True)
-                assert result.chunk_num is not None, f"Result.chunk_num must be defined"
+                assert result.chunk_num is not None, "Result.chunk_num must be defined"
                 path_chunk = Path(self.docling_dir) / f"{path.stem}_p{result.page_num}_{result.chunk_num}.png"
                 assert path_chunk.exists(), f"Path {path_chunk} for chunk {result.chunk_num} does not exists"
                 image = Image.open(path_chunk)

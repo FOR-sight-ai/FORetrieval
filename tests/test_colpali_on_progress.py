@@ -48,9 +48,12 @@ def test_on_progress_emits_expected_events(tmp_path, monkeypatch):
     fake = _FakeColPaliModel()
     fake.index_name = None
     fake.index_root = str(tmp_path)
+    fake.storage_backend = "local"
+    fake.storage_config = {}
     fake.full_document_collection = False
     fake.vector_store = type("V", (), {
         "open": lambda *a, **k: None,
+        "supports_remote_bookkeeping": lambda *a, **k: False,
     })()
     fake.processor = None
     fake.doc_id_to_metadata = {}
@@ -117,8 +120,13 @@ def test_on_progress_exception_is_swallowed(tmp_path, monkeypatch):
     fake = _FakeColPaliModel()
     fake.index_name = None
     fake.index_root = str(tmp_path)
+    fake.storage_backend = "local"
+    fake.storage_config = {}
     fake.full_document_collection = False
-    fake.vector_store = type("V", (), {"open": lambda *a, **k: None})()
+    fake.vector_store = type("V", (), {
+        "open": lambda *a, **k: None,
+        "supports_remote_bookkeeping": lambda *a, **k: False,
+    })()
     fake.processor = None
     fake.doc_id_to_metadata = {}
     fake.doc_ids = set()
