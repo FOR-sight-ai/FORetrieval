@@ -362,12 +362,13 @@ class ColPaliModel:
         self.doc_id_to_metadata = {
             int(k): v for k, v in (blob.get("doc_id_to_metadata") or {}).items()
         }
-        self.highest_doc_id = max(self.doc_id_to_metadata.keys(), default=-1)
-        self.doc_ids = set(self.doc_id_to_metadata.keys())
+        # Derive doc_ids / highest_doc_id from the file-names map (always
+        # present in bookkeeping, even when add_metadata=False).
+        id_source = self.doc_ids_to_file_names or self.doc_id_to_metadata
+        self.highest_doc_id = max(id_source.keys(), default=-1)
+        self.doc_ids = set(id_source.keys())
 
     def _load_index_state(self):
-        if self.index_name is None:
-            raise ValueError("No index name specified. Cannot load from index.")
 
         # Remote bookkeeping mode: pull everything from the server, no local
         # index directory is read.
@@ -412,8 +413,13 @@ class ColPaliModel:
             self.vector_store.set_processor(self.processor)
             self.vector_store.set_doc_id_to_metadata(self.doc_id_to_metadata)
 
-        self.highest_doc_id = max(self.doc_id_to_metadata.keys(), default=-1)
-        self.doc_ids = set(self.doc_id_to_metadata.keys())
+        # Derive doc_ids / highest_doc_id from the file-names map (always
+        # written, even when add_metadata=False) so that a no-metadata index
+        # loads correctly.  Fall back to the metadata map only when the
+        # file-names map is empty (e.g. legacy in-memory-only indexes).
+        id_source = self.doc_ids_to_file_names or self.doc_id_to_metadata
+        self.highest_doc_id = max(id_source.keys(), default=-1)
+        self.doc_ids = set(id_source.keys())
 
     def _load_local_sidecars(self, index_path: Path):
         extra_path = index_path / "embed_id_to_extra.pt"
@@ -659,6 +665,57 @@ class ColPaliModel:
     # Index building and ingestion
     # ============================================================
 
+    def _cleanup_failed_index(self, index_name: str) -> None:
+        """Remove artefacts created by a failed ``index()`` call.
+
+        Called when indexing raises an exception after the vector store and/or
+        local index directory were already created, so the caller can retry
+        with the same index name without hitting "index already exists".
+
+        For the local backend the index directory is removed with
+        ``shutil.rmtree``.  For the remote (server-side bookkeeping) backend
+        the remote collection is deleted via the server client.  Errors during
+        cleanup are logged as warnings and swallowed so that the original
+        exception propagates cleanly.
+        """
+        # Reset in-memory state so the object is reusable after cleanup.
+        self.index_name = None
+        self.highest_doc_id = -1
+        self.doc_ids = set()
+        self.doc_ids_to_file_names = {}
+        self.doc_id_to_metadata = {}
+
+        # Local backend: remove the partial index directory.
+        index_path = Path(self.index_root) / index_name
+        if index_path.exists():
+            try:
+                shutil.rmtree(index_path)
+                logger.info(
+                    "Cleaned up partial local index directory: %s", index_path
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Could not remove partial index directory %s: %s",
+                    index_path,
+                    exc,
+                )
+
+        # Remote backend: delete the collection on the server.
+        if self.storage_backend == "remote" and self._uses_remote_bookkeeping():
+            from .vector_store.remote import RemoteVectorStore
+            if isinstance(self.vector_store, RemoteVectorStore):
+                try:
+                    self.vector_store._client.delete_collection(index_name)
+                    logger.info(
+                        "Cleaned up partial remote collection: %s", index_name
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "Could not delete remote collection %s: %s",
+                        index_name,
+                        exc,
+                    )
+
     def index(
         self,
         input_path: Union[str, Path],
@@ -733,127 +790,145 @@ class ColPaliModel:
         if not hasattr(self, "highest_doc_id") or overwrite is True:
             self.highest_doc_id = -1
 
+        # Validate before entering the try block so that validation errors also
+        # trigger cleanup of the just-opened vector store / local directory.
         if input_path.is_dir():
             items = sorted(
                 (p for p in input_path.rglob("*") if p.is_file()),
                 key=lambda p: p.relative_to(input_path),
             )
             if doc_ids is not None and len(doc_ids) != len(items):
+                self._cleanup_failed_index(index_name)
                 raise ValueError(
                     f"Number of doc_ids ({len(doc_ids)}) does not match number of documents ({len(items)})"
                 )
             if metadata is not None and len(metadata) != len(items):
+                self._cleanup_failed_index(index_name)
                 raise ValueError(
                     f"Number of metadata entries ({len(metadata)}) does not match number of documents ({len(items)})"
                 )
-            n_files = len(items)
-            if on_progress is not None:
-                try:
-                    on_progress({"stage": "start", "n_files": n_files})
-                except Exception:  # noqa: BLE001
-                    pass
-            for i, item in tqdm(
-                enumerate(items), total=n_files, desc="Indexing files"
-            ):
-                doc_id = doc_ids[i] if doc_ids else self.highest_doc_id + 1
-                if metadata is None:
-                    doc_md = None
-                elif isinstance(metadata, list):
-                    doc_md = metadata[i]
-                elif isinstance(metadata, dict):
-                    doc_md = metadata.get(doc_id)
-                else:
-                    doc_md = metadata[doc_id] if metadata else None
+        else:
+            items = None  # single-file path handled below
 
+        try:
+            if items is not None:
+                # Directory indexing path
+                n_files = len(items)
                 if on_progress is not None:
                     try:
+                        on_progress({"stage": "start", "n_files": n_files})
+                    except Exception:  # noqa: BLE001
+                        pass
+                for i, item in tqdm(
+                    enumerate(items), total=n_files, desc="Indexing files"
+                ):
+                    doc_id = doc_ids[i] if doc_ids else self.highest_doc_id + 1
+                    if metadata is None:
+                        doc_md = None
+                    elif isinstance(metadata, list):
+                        doc_md = metadata[i]
+                    elif isinstance(metadata, dict):
+                        doc_md = metadata.get(doc_id)
+                    else:
+                        doc_md = metadata[doc_id] if metadata else None
+
+                    if on_progress is not None:
+                        try:
+                            on_progress({
+                                "stage": "file_start",
+                                "file": item.name,
+                                "file_idx": i,
+                                "n_files": n_files,
+                            })
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                    try:
+                        self.add_to_index(
+                            item,
+                            store_collection_with_index,
+                            doc_id=doc_id,
+                            metadata=doc_md,
+                            batch_size=batch_size,
+                            on_progress=on_progress,
+                            _file_idx=i,
+                            _n_files=n_files,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Skipping faulty PDF {item}:\n{str(e)}")
+                        continue
+
+                    if on_progress is not None:
+                        try:
+                            on_progress({
+                                "stage": "file_done",
+                                "file": item.name,
+                                "file_idx": i,
+                                "n_files": n_files,
+                            })
+                        except Exception:  # noqa: BLE001
+                            pass
+
+            else:
+                # Single-file indexing path
+                if metadata is not None and len(metadata) != 1:
+                    raise ValueError(
+                        "For a single document, metadata should be a list with one dictionary"
+                    )
+                doc_id = doc_ids[0] if doc_ids else self.highest_doc_id + 1
+                doc_metadata = metadata[0] if metadata else None
+                if on_progress is not None:
+                    try:
+                        on_progress({"stage": "start", "n_files": 1})
                         on_progress({
                             "stage": "file_start",
-                            "file": item.name,
-                            "file_idx": i,
-                            "n_files": n_files,
+                            "file": input_path.name,
+                            "file_idx": 0,
+                            "n_files": 1,
                         })
                     except Exception:  # noqa: BLE001
                         pass
-
-                try:
-                    self.add_to_index(
-                        item,
-                        store_collection_with_index,
-                        doc_id=doc_id,
-                        metadata=doc_md,
-                        batch_size=batch_size,
-                        on_progress=on_progress,
-                        _file_idx=i,
-                        _n_files=n_files,
-                    )
-                except Exception as e:
-                    logger.warning(f"Skipping faulty PDF {item}:\n{str(e)}")
-                    continue
-
+                self.add_to_index(
+                    input_path,
+                    store_collection_with_index,
+                    doc_id=doc_id,
+                    metadata=doc_metadata,
+                    on_progress=on_progress,
+                    _file_idx=0,
+                    _n_files=1,
+                )
                 if on_progress is not None:
                     try:
                         on_progress({
                             "stage": "file_done",
-                            "file": item.name,
-                            "file_idx": i,
-                            "n_files": n_files,
+                            "file": input_path.name,
+                            "file_idx": 0,
+                            "n_files": 1,
                         })
                     except Exception:  # noqa: BLE001
                         pass
 
-        else:
-            if metadata is not None and len(metadata) != 1:
-                raise ValueError(
-                    "For a single document, metadata should be a list with one dictionary"
-                )
-            doc_id = doc_ids[0] if doc_ids else self.highest_doc_id + 1
-            doc_metadata = metadata[0] if metadata else None
             if on_progress is not None:
                 try:
-                    on_progress({"stage": "start", "n_files": 1})
-                    on_progress({
-                        "stage": "file_start",
-                        "file": input_path.name,
-                        "file_idx": 0,
-                        "n_files": 1,
-                    })
-                except Exception:  # noqa: BLE001
-                    pass
-            self.add_to_index(
-                input_path,
-                store_collection_with_index,
-                doc_id=doc_id,
-                metadata=doc_metadata,
-                on_progress=on_progress,
-                _file_idx=0,
-                _n_files=1,
-            )
-            if on_progress is not None:
-                try:
-                    on_progress({
-                        "stage": "file_done",
-                        "file": input_path.name,
-                        "file_idx": 0,
-                        "n_files": 1,
-                    })
+                    on_progress({"stage": "all_done"})
                 except Exception:  # noqa: BLE001
                     pass
 
-        if on_progress is not None:
-            try:
-                on_progress({"stage": "all_done"})
-            except Exception:  # noqa: BLE001
-                pass
+            # Auto-generate index description from per-doc AI metadata when available
+            if not description and ai_cfg and self.doc_id_to_metadata:
+                from .metadata import generate_index_description
+                description = generate_index_description(self.doc_id_to_metadata, ai_cfg)
 
-        # Auto-generate index description from per-doc AI metadata when available
-        if not description and ai_cfg and self.doc_id_to_metadata:
-            from .metadata import generate_index_description
-            description = generate_index_description(self.doc_id_to_metadata, ai_cfg)
+            self._export_index(description=description)
+            if self.highest_doc_id == -1:
+                logger.warning("No documents were indexed.")
 
-        self._export_index(description=description)
-        if self.highest_doc_id == -1:
-            logger.warning("No documents were indexed.")
+        except Exception:
+            # Indexing failed after the vector store / local directory were
+            # already created.  Remove the partial artefacts so the caller can
+            # retry cleanly.
+            self._cleanup_failed_index(index_name)
+            raise
 
         return self.doc_ids_to_file_names
 

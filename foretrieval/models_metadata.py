@@ -101,29 +101,34 @@ class MetadataFilter(BaseModel):
 def build_metadata_list_for_dir(
     input_dir: Path, provider: Callable[[Path], Dict[str, Any]]
 ) -> List[Optional[DocMetadata]]:
-    """Build a metadata list for every entry in ``input_dir``.
+    """Build a metadata list aligned with ``ColPaliModel.index()``'s file ordering.
 
-    The list is sorted by filename (``p.name``) so that its order matches
-    the sorted iteration used by ``ColPaliModel.index()`` when it receives a
-    directory path.  Using an unsorted ``iterdir()`` in both places could
-    produce a different ordering between two independent calls on the same
-    directory, silently misaligning metadata with the wrong documents.
+    ``index()`` enumerates all files recursively using::
+
+        sorted((p for p in input_dir.rglob("*") if p.is_file()),
+               key=lambda p: p.relative_to(input_dir))
+
+    This function mirrors that enumeration exactly so that ``metadata[i]``
+    corresponds to the ``i``-th file visited by ``index()``.  Sub-directories
+    are **not** represented in the list (``index()`` skips them).
 
     Args:
-        input_dir: Directory whose contents will be enumerated.
+        input_dir: Root directory whose file tree will be enumerated.
         provider: Callable that receives a ``Path`` and returns a metadata
-            dict compatible with ``DocMetadata``.
+            dict compatible with ``DocMetadata``, or ``None``/empty dict to
+            indicate that no metadata is available for that file.
 
     Returns:
-        A list aligned with ``sorted(input_dir.iterdir(), key=lambda p: p.name)``.
-        Files produce ``DocMetadata`` instances; sub-directories produce ``None``.
+        A list with one entry per file found by recursive ``rglob``, in the
+        same order used by ``ColPaliModel.index()``.  Each entry is either a
+        ``DocMetadata`` instance or ``None`` when the provider returns nothing.
     """
-    items = sorted(input_dir.iterdir(), key=lambda p: p.name)
+    items = sorted(
+        (p for p in input_dir.rglob("*") if p.is_file()),
+        key=lambda p: p.relative_to(input_dir),
+    )
     md_list: List[Optional[DocMetadata]] = []
     for p in items:
-        if p.is_file():
-            raw = provider(p)
-            md_list.append(DocMetadata(**raw) if raw else None)
-        else:
-            md_list.append(None)
+        raw = provider(p)
+        md_list.append(DocMetadata(**raw) if raw else None)
     return md_list

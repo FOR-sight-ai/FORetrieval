@@ -280,24 +280,24 @@ def test_no_ai_multiple_formats_no_crash(provider, path):
 
 
 def test_build_metadata_list_for_dir_length(provider):
-    """Result list has the same length as sorted(DATA_DIR.iterdir())."""
-    items = sorted(DATA_DIR.iterdir(), key=lambda p: p.name)
+    """Result list has the same length as the recursive file enumeration used by index()."""
+    items = sorted(
+        (p for p in DATA_DIR.rglob("*") if p.is_file()),
+        key=lambda p: p.relative_to(DATA_DIR),
+    )
     md_list = build_metadata_list_for_dir(DATA_DIR, provider)
     assert len(md_list) == len(items)
 
 
 def test_build_metadata_list_for_dir_all_doc_metadata(provider):
-    """Every file entry in DATA_DIR produces a DocMetadata instance."""
+    """Every entry in the result list is a DocMetadata instance (no None placeholders)."""
     md_list = build_metadata_list_for_dir(DATA_DIR, provider)
-    for item, md in zip(
-        sorted(DATA_DIR.iterdir(), key=lambda p: p.name), md_list
-    ):
-        if item.is_file():
-            assert isinstance(md, DocMetadata), (
-                f"Expected DocMetadata for file {item.name}, got {type(md)}"
-            )
-        else:
-            assert md is None, f"Expected None for directory {item.name}"
+    for md in md_list:
+        # All entries are files (directories are excluded); provider always
+        # returns metadata for PDF files in DATA_DIR.
+        assert isinstance(md, DocMetadata), (
+            f"Expected DocMetadata for all entries, got {type(md)}"
+        )
 
 
 def test_build_metadata_list_for_dir_order_stable(provider):
@@ -316,16 +316,15 @@ def test_build_metadata_list_for_dir_order_stable(provider):
 
 
 def test_build_metadata_list_for_dir_stems_match_sorted_filenames(provider):
-    """Stems in the result list match the stems of sorted filenames.
+    """Stems in the result list match the stems of recursively-sorted filenames.
 
-    This test validates that the fix (sorting by p.name) correctly aligns
-    the metadata list with the order used by ColPaliModel.index(), which
-    also iterates files sorted by name.
+    Validates that the list is aligned with ColPaliModel.index() which iterates
+    files via rglob("*") sorted by relative path.
     """
-    sorted_files = [
-        p for p in sorted(DATA_DIR.iterdir(), key=lambda p: p.name)
-        if p.is_file()
-    ]
+    sorted_files = sorted(
+        (p for p in DATA_DIR.rglob("*") if p.is_file()),
+        key=lambda p: p.relative_to(DATA_DIR),
+    )
     md_list = [
         md for md in build_metadata_list_for_dir(DATA_DIR, provider)
         if md is not None
@@ -335,3 +334,45 @@ def test_build_metadata_list_for_dir_stems_match_sorted_filenames(provider):
         assert md.stem == expected_path.stem, (
             f"Stem mismatch: expected '{expected_path.stem}', got '{md.stem}'"
         )
+
+
+def test_build_metadata_list_for_dir_recursive_alignment(provider, tmp_path):
+    """metadata list is aligned with index()'s rglob enumeration for nested dirs.
+
+    This is a regression test for the bug where build_metadata_list_for_dir used
+    non-recursive iterdir() while index() used recursive rglob(), causing a count
+    mismatch and ValueError when add_metadata=True on a multi-level dataset.
+    """
+    # Create a nested directory structure:
+    #   tmp_path/
+    #     a.pdf  (top-level file)
+    #     sub/
+    #       b.pdf
+    #       deep/
+    #         c.pdf
+    (tmp_path / "a.pdf").write_bytes(b"%PDF-1.4 fake")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.pdf").write_bytes(b"%PDF-1.4 fake")
+    (tmp_path / "sub" / "deep").mkdir()
+    (tmp_path / "sub" / "deep" / "c.pdf").write_bytes(b"%PDF-1.4 fake")
+
+    def simple_provider(path):
+        return {"stem": path.stem, "ext": path.suffix}
+
+    md_list = build_metadata_list_for_dir(tmp_path, simple_provider)
+
+    # index() would enumerate: a.pdf, sub/b.pdf, sub/deep/c.pdf (sorted by relative path)
+    expected_files = sorted(
+        (p for p in tmp_path.rglob("*") if p.is_file()),
+        key=lambda p: p.relative_to(tmp_path),
+    )
+    assert len(md_list) == len(expected_files) == 3, (
+        f"Expected 3 entries, got {len(md_list)}"
+    )
+    for i, (expected_path, md) in enumerate(zip(expected_files, md_list)):
+        assert md is not None, f"Entry {i} ({expected_path.name}) should not be None"
+        assert md.stem == expected_path.stem, (
+            f"Entry {i}: stem mismatch — expected '{expected_path.stem}', got '{md.stem}'"
+        )
+
+

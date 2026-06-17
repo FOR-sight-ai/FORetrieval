@@ -2,7 +2,7 @@ import base64
 import io
 import numpy as np
 from PIL import Image, ImageDraw
-import matplotlib.cm as cm
+import matplotlib
 import torch
 import torch.nn.functional as F
 
@@ -169,7 +169,7 @@ def heatmap_overlay_base64(
 
     # colorize + blend (comme ton code)
     heat_f = heat_img.astype(np.float32) / 255.0
-    cmap_fn = cm.get_cmap(cmap)
+    cmap_fn = matplotlib.colormaps[cmap]
     rgba = cmap_fn(heat_f)
     heat_rgb = (rgba[..., :3] * 255).astype(np.uint8)
 
