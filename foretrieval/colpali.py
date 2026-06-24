@@ -1620,7 +1620,12 @@ class ColPaliModel:
             if need_circle:
                 soft = (hm.get("soft_topk") or {}).get("heat_2d")
                 if soft is not None:
-                    img_marked = draw_circle_on_max_patch(img=img, heat_2d=soft)
+                    img_marked = draw_circle_on_max_patch(
+                        img=img,
+                        heat_2d=soft,
+                        patch_grow_pct=300.0,
+                        grow_mode="mean",
+                    )
                     meta["soft_topk_max_patch_circle_base64"] = pil_to_base64_png(img_marked)
 
             r.metadata = meta
