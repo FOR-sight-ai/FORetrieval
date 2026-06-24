@@ -26,6 +26,29 @@ def pil_from_base64(b64: str) -> Image.Image:
     data = base64.b64decode(b64)
     return Image.open(io.BytesIO(data)).convert("RGB")
 
+def grow_heatmap_patches_torch(
+    heat_2d: torch.Tensor,
+    patch_grow_pct: float = 100.0,   # 100 = no-op
+    grow_mode: str = "max",          # "max" | "mean"
+) -> torch.Tensor:
+    if patch_grow_pct is None or patch_grow_pct <= 100.0:
+        return heat_2d
+
+    scale = float(patch_grow_pct) / 100.0
+    # 200% -> radius=1 (3x3), 300% -> radius=2 (5x5)...
+    radius = int(round(scale - 1.0))
+    radius = max(1, radius)
+    k = 2 * radius + 1
+
+    x = heat_2d.float()[None, None, :, :]  # [1,1,H,W]
+    if grow_mode == "max":
+        y = F.max_pool2d(x, kernel_size=k, stride=1, padding=radius)
+    elif grow_mode == "mean":
+        y = F.avg_pool2d(x, kernel_size=k, stride=1, padding=radius)
+    else:
+        raise ValueError("grow_mode doit être 'max' ou 'mean'")
+    return y[0, 0]
+
 def draw_circle_on_max_patch(
     img: Image.Image,
     heat_2d,                       # torch.Tensor [Hp,Wp] ou np array
@@ -36,19 +59,32 @@ def draw_circle_on_max_patch(
     shift_y: float = 0.0,
     color_inner=(255, 255, 255, 255), # blanc
     color_outer=(0, 0, 0, 255),       # noir
+    patch_grow_pct: float = 100.0,   # apply same grow as heatmap before picking argmax
+    grow_mode: str = "max",          # "max" | "mean" — match heatmap caller
 ) -> Image.Image:
     """
     Dessine un cercle (anneau) centré sur le patch max de heat_2d.
     circle_scale_pct est relatif à la taille DU PATCH en pixels :
       - 100% => diamètre == patch_w/patch_h (on prend une moyenne)
       - 300% => diamètre == 3x patch (donc rayon == 1.5x patch)
+
+    patch_grow_pct / grow_mode: optionally grow the heat grid (same as heatmap_overlay_base64)
+    before computing argmax, so the circle center aligns with the heatmap highlight.
+    Pass the same values used in the heatmap call (e.g. patch_grow_pct=300, grow_mode="mean").
     """
 
-    # --- heat -> numpy + argmax ---
+    # --- heat -> torch tensor for optional grow ---
     if hasattr(heat_2d, "detach"):
-        heat_np = heat_2d.detach().float().cpu().numpy()
+        heat_t = heat_2d.detach().float()
     else:
-        heat_np = np.array(heat_2d, dtype=np.float32)
+        heat_t = torch.tensor(np.array(heat_2d), dtype=torch.float32)
+
+    # apply same grow as heatmap so argmax lands on the same visual peak
+    if patch_grow_pct is not None and patch_grow_pct > 100.0:
+        heat_t = grow_heatmap_patches_torch(heat_t, patch_grow_pct=patch_grow_pct, grow_mode=grow_mode)
+
+    # --- heat -> numpy + argmax ---
+    heat_np = heat_t.cpu().numpy()
 
     Hp, Wp = heat_np.shape
     flat_idx = int(np.argmax(heat_np))
@@ -86,29 +122,6 @@ def draw_circle_on_max_patch(
         draw.ellipse(bbox, outline=color_inner, width=outline_width)
 
     return out.convert("RGB")
-
-def grow_heatmap_patches_torch(
-    heat_2d: torch.Tensor,
-    patch_grow_pct: float = 100.0,   # 100 = no-op
-    grow_mode: str = "max",          # "max" | "mean"
-) -> torch.Tensor:
-    if patch_grow_pct is None or patch_grow_pct <= 100.0:
-        return heat_2d
-
-    scale = float(patch_grow_pct) / 100.0
-    # 200% -> radius=1 (3x3), 300% -> radius=2 (5x5)...
-    radius = int(round(scale - 1.0))
-    radius = max(1, radius)
-    k = 2 * radius + 1
-
-    x = heat_2d.float()[None, None, :, :]  # [1,1,H,W]
-    if grow_mode == "max":
-        y = F.max_pool2d(x, kernel_size=k, stride=1, padding=radius)
-    elif grow_mode == "mean":
-        y = F.avg_pool2d(x, kernel_size=k, stride=1, padding=radius)
-    else:
-        raise ValueError("grow_mode doit être 'max' ou 'mean'")
-    return y[0, 0]
 
 def heatmap_overlay_base64(
     img: Image.Image,
