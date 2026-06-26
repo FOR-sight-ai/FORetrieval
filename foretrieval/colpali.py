@@ -1499,7 +1499,7 @@ class ColPaliModel:
                 doc_id=doc_id,
                 page_num=page_id,
                 chunk_num=int(chunk_id) if chunk_id is not None else None,
-                score=hit.score,
+                score=float(hit.score), #force float conversion to avoid pyTorch Tensors
                 metadata=payload.get("metadata", self.doc_id_to_metadata.get(doc_id, {})),
                 base64=self.collection.get(hit.point_id) if return_base64_results else None,
             )
