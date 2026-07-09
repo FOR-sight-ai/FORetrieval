@@ -1,0 +1,21 @@
+services:
+  rag-orch:
+    build:
+      context: .
+    container_name: ${ORCH_CONTAINER_NAME:-rag-orch}
+    ports:
+      - "${ORCH_HOST_PORT:-8000}:8000"
+    environment:
+      EMBEDDING_SERVICE_URL: ${EMBEDDING_SERVICE_URL:-http://localhost:8001}
+      VECTOR_DB_BACKEND: ${VECTOR_DB_BACKEND:-milvus}
+      MILVUS_URL: ${MILVUS_URL:-http://rag-db-milvus:19530}
+      MILVUS_CANDIDATE_LIMIT: ${MILVUS_CANDIDATE_LIMIT:-64}
+      QDRANT_URL: ${QDRANT_URL:-http://localhost:6333}
+      DEFAULT_PDF_DPI: ${DEFAULT_PDF_DPI:-150}
+      VECTOR_DB_UPSERT_BATCH_SIZE: ${VECTOR_DB_UPSERT_BATCH_SIZE:-16}
+    networks:
+      - rag-network
+
+networks:
+  rag-network:
+    external: true

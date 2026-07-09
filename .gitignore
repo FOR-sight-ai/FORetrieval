@@ -139,3 +139,10 @@ pylate/*
 pylate/
 
 .byaldi/
+
+docker/RAG_DB/storage/*
+docker/RAG_DB_Milvus/volumes/*
+!docker/RAG_DB/storage/.gitkeep
+!docker/RAG_DB_Milvus/volumes/etcd/.gitkeep
+!docker/RAG_DB_Milvus/volumes/minio/.gitkeep
+!docker/RAG_DB_Milvus/volumes/milvus/.gitkeep
