@@ -8,7 +8,7 @@ import shutil
 import srsly
 import tempfile
 from tqdm import tqdm
-from typing import Dict, List, Optional, Union, Any, Callable
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, Any, Callable
 
 from colpali_engine.models import ColPali, ColPaliProcessor, ColQwen2, ColQwen2_5, ColQwen2_5_Processor, ColQwen2Processor
 
@@ -42,6 +42,9 @@ from .vector_store import (
     make_point_id,
     make_vector_store,
 )
+
+if TYPE_CHECKING:
+    from .vector_store.remote import RemoteVectorStore
 
 VERSION = "0.0.1"
 
@@ -315,6 +318,14 @@ class ColPaliModel:
             return bool(supports()) if callable(supports) else False
         except Exception:
             return False
+
+    def _remote_bookkeeping_store(self) -> Optional["RemoteVectorStore"]:
+        """Return the RemoteVectorStore when vectors and bookkeeping live on a server."""
+        from .vector_store.remote import RemoteVectorStore
+
+        if self._uses_remote_bookkeeping() and isinstance(self.vector_store, RemoteVectorStore):
+            return self.vector_store
+        return None
 
     def _build_bookkeeping_blob(self, description: str = "") -> Dict[str, Any]:
         """Assemble the in-memory bookkeeping into a single serialisable blob."""
@@ -701,20 +712,19 @@ class ColPaliModel:
                 )
 
         # Remote backend: delete the collection on the server.
-        if self.storage_backend == "remote" and self._uses_remote_bookkeeping():
-            from .vector_store.remote import RemoteVectorStore
-            if isinstance(self.vector_store, RemoteVectorStore):
-                try:
-                    self.vector_store._client.delete_collection(index_name)
-                    logger.info(
-                        "Cleaned up partial remote collection: %s", index_name
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(
-                        "Could not delete remote collection %s: %s",
-                        index_name,
-                        exc,
-                    )
+        remote_store = self._remote_bookkeeping_store()
+        if remote_store is not None:
+            try:
+                remote_store.delete_collection(index_name)
+                logger.info(
+                    "Cleaned up partial remote collection: %s", index_name
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Could not delete remote collection %s: %s",
+                    index_name,
+                    exc,
+                )
 
     def index(
         self,
@@ -747,12 +757,27 @@ class ColPaliModel:
 
         index_path = Path(os.path.join(Path(self.index_root), Path(index_name)))
         # In remote bookkeeping mode the local index directory is irrelevant
-        # (vectors and bookkeeping live on the server), so skip the local-dir
-        # existence guard entirely.
-        if (
-            not (self.storage_backend == "remote" and self._uses_remote_bookkeeping())
-            and index_path.exists()
-        ):
+        # (vectors and bookkeeping live on the server), so the same
+        # exists / overwrite guard is applied to the server collection instead.
+        remote_store = (
+            self._remote_bookkeeping_store() if self.storage_backend == "remote" else None
+        )
+        if remote_store is not None:
+            if overwrite:
+                logger.info(
+                    "overwrite is on. Deleting existing remote collection %s to build a new one.",
+                    index_name,
+                )
+                remote_store.delete_collection(index_name)
+            elif remote_store.has_bookkeeping(index_name):
+                logger.warning(
+                    "An index named %s already exists on the server. "
+                    "Use overwrite=True to delete it and build a new one. "
+                    "Exiting indexing without doing anything...",
+                    index_name,
+                )
+                return None
+        elif index_path.exists():
             if not overwrite and (
                 (index_path.is_dir() and len(list(index_path.iterdir())) > 0)
                 or index_path.is_file()
@@ -768,6 +793,15 @@ class ColPaliModel:
                     f"overwrite is on. Deleting existing index {index_name} to build a new one."
                 )
                 shutil.rmtree(index_path)
+
+        if overwrite:
+            # Drop state carried over from a previously loaded/built index so it
+            # is neither re-exported nor mistaken for already-indexed documents.
+            self.doc_ids = set()
+            self.doc_ids_to_file_names = {}
+            self.doc_id_to_metadata = {}
+            self.embed_id_to_extra = {}
+            self.collection = {}
 
         if store_collection_with_index:
             self.full_document_collection = True
@@ -810,6 +844,7 @@ class ColPaliModel:
         else:
             items = None  # single-file path handled below
 
+        n_indexed = 0
         try:
             if items is not None:
                 # Directory indexing path
@@ -857,6 +892,7 @@ class ColPaliModel:
                     except Exception as e:
                         logger.warning(f"Skipping faulty PDF {item}:\n{str(e)}")
                         continue
+                    n_indexed += 1
 
                     if on_progress is not None:
                         try:
@@ -897,6 +933,7 @@ class ColPaliModel:
                     _file_idx=0,
                     _n_files=1,
                 )
+                n_indexed = 1
                 if on_progress is not None:
                     try:
                         on_progress({
@@ -920,7 +957,9 @@ class ColPaliModel:
                 description = generate_index_description(self.doc_id_to_metadata, ai_cfg)
 
             self._export_index(description=description)
-            if self.highest_doc_id == -1:
+            # highest_doc_id alone is not reliable here: add_to_index bumps it
+            # before a document can still fail and be skipped.
+            if n_indexed == 0:
                 logger.warning("No documents were indexed.")
 
         except Exception:
