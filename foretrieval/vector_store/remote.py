@@ -123,6 +123,21 @@ class RemoteVectorStore(VectorStore):
             self._index_name, self._backend, dim, self._storage_config
         )
 
+    def delete_collection(self, index_name: str) -> None:
+        """Delete ``index_name`` (vectors and bookkeeping) on the server.
+
+        Idempotent: deleting a missing collection is not an error.
+        """
+        self._client.delete_collection(index_name)
+        if self._index_name == index_name:
+            self._index_name = None
+            self._opened = False
+
+    def has_bookkeeping(self, index_name: str) -> bool:
+        """Return True if the server holds a non-empty index for ``index_name``."""
+        blob = self._client.get_bookkeeping(index_name)
+        return bool(blob and blob.get("doc_ids_to_file_names"))
+
     # ------------------------------------------------------------------
     # Write
     # ------------------------------------------------------------------

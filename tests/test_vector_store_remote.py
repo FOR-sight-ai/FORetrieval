@@ -82,6 +82,40 @@ class TestCollectionExists:
         client.collection_exists.assert_called_with("idx")
 
 
+class TestDeleteCollection:
+    def test_delegates_to_client(self):
+        store, client = _make_store()
+        store.delete_collection("idx")
+        client.delete_collection.assert_called_once_with("idx")
+
+    def test_closes_store_when_deleting_open_collection(self):
+        store, _ = _make_store()
+        store.open("idx", Path("."), create=True)
+        store.delete_collection("idx")
+        assert not store.is_opened
+        assert store.collection_exists() is False
+
+    def test_keeps_store_open_when_deleting_other_collection(self):
+        store, _ = _make_store()
+        store.open("idx", Path("."), create=True)
+        store.delete_collection("other")
+        assert store.is_opened
+
+
+class TestHasBookkeeping:
+    def test_true_when_server_has_documents(self):
+        store, client = _make_store()
+        client.get_bookkeeping.return_value = {"doc_ids_to_file_names": {0: "a.pdf"}}
+        assert store.has_bookkeeping("idx") is True
+        client.get_bookkeeping.assert_called_once_with("idx")
+
+    @pytest.mark.parametrize("blob", [None, {}, {"doc_ids_to_file_names": {}}])
+    def test_false_when_missing_or_empty(self, blob):
+        store, client = _make_store()
+        client.get_bookkeeping.return_value = blob
+        assert store.has_bookkeeping("idx") is False
+
+
 # ---------------------------------------------------------------------------
 # upsert / point_exists
 # ---------------------------------------------------------------------------
