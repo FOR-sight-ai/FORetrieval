@@ -147,8 +147,9 @@ def built_index(server_client, tmp_path):
 # ---------------------------------------------------------------------------
 
 class TestOverwriteExistingRemoteIndex:
+    @pytest.mark.usefixtures("built_index")
     def test_overwrite_from_fresh_instance_replaces_collection(
-        self, server_client, built_index, tmp_path, caplog
+        self, server_client, tmp_path, caplog
     ):
         data_v2 = _make_data_dir(tmp_path / "v2", ["green"])
         model = _make_model(server_client, tmp_path / "idx")
@@ -188,7 +189,8 @@ class TestOverwriteExistingRemoteIndex:
 
 
 class TestNoOverwriteExistingRemoteIndex:
-    def test_existing_index_is_left_untouched(self, server_client, built_index, tmp_path, caplog):
+    @pytest.mark.usefixtures("built_index")
+    def test_existing_index_is_left_untouched(self, server_client, tmp_path, caplog):
         data_v2 = _make_data_dir(tmp_path / "v2", ["green"])
         model = _make_model(server_client, tmp_path / "idx")
 
